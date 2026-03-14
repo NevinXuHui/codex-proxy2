@@ -5,7 +5,7 @@ release/
 public-desktop/
 data/
 public/
-docs/
+# docs/
 bin/
 .env
 *.log
