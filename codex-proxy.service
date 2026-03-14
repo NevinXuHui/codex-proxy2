@@ -1,0 +1,27 @@
+[Unit]
+Description=Codex Proxy - OpenAI-compatible API for Codex Desktop
+Documentation=https://github.com/icebear0828/codex-proxy
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/mine/Code/ai-tools/codex-proxy
+Environment="NODE_ENV=production"
+Environment="PORT=9100"
+ExecStart=/usr/bin/node /mine/Code/ai-tools/codex-proxy/dist/index.js
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=codex-proxy
+
+# 安全加固
+NoNewPrivileges=true
+PrivateTmp=true
+
+# 资源限制
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target
