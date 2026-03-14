@@ -29,3 +29,5 @@ stitch-designs/
 stitch-screens/
 CLAUDE.md
 *.tar.gz
+token/
+.history/
