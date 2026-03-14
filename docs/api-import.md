@@ -78,7 +78,7 @@ Content-Type: application/json
 ### cURL
 
 ```bash
-curl -X POST http://localhost:8338/auth/accounts/import \
+curl -X POST http://localhost:9100/auth/accounts/import \
   -H "Content-Type: application/json" \
   -d '{
     "access_token": "eyJhbGc...",
@@ -91,7 +91,7 @@ curl -X POST http://localhost:8338/auth/accounts/import \
 ### JavaScript (Fetch)
 
 ```javascript
-const response = await fetch('http://localhost:8338/auth/accounts/import', {
+const response = await fetch('http://localhost:9100/auth/accounts/import', {
   method: 'POST',
   headers: {
     'Content-Type': 'application/json',
@@ -117,7 +117,7 @@ if (result.success) {
 ```python
 import requests
 
-url = 'http://localhost:8338/auth/accounts/import'
+url = 'http://localhost:9100/auth/accounts/import'
 data = {
     'access_token': 'eyJhbGc...',
     'refresh_token': 'v1.abc...',
@@ -146,7 +146,7 @@ async function importMultipleAccounts(tokenFiles) {
 
   for (const tokenData of tokenFiles) {
     try {
-      const response = await fetch('http://localhost:8338/auth/accounts/import', {
+      const response = await fetch('http://localhost:9100/auth/accounts/import', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(tokenData)
@@ -169,7 +169,7 @@ async function importMultipleAccounts(tokenFiles) {
 
 前端提供了可视化的文件上传功能：
 
-1. 访问 Web 界面（默认 `http://localhost:8338`）
+1. 访问 Web 界面（默认 `http://localhost:9100`）
 2. 点击 "📁 导入 Token 文件" 按钮
 3. 选择一个或多个 `.json` 格式的 Token 文件
 4. 系统自动批量导入并刷新账号列表

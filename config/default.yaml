@@ -24,7 +24,7 @@ auth:
   oauth_token_endpoint: https://auth.openai.com/oauth/token
 server:
   host: "::"
-  port: 8080
+  port: 9100
   proxy_api_key: sk-36fc0c8dc2e2e7f8c02800284deac614250fecce86fea6cd
 session:
   ttl_minutes: 60
