@@ -272,6 +272,30 @@ export async function handleProxyRequest(
           `[${fmt.tag}] Account ${activeEntryId} | Codex API error:`,
           err.message,
         );
+
+        // Check for deactivated account (401 with "deactivated" in message)
+        if (err.status === 401 && err.message.toLowerCase().includes("deactivated")) {
+          const entry = accountPool.getEntry(activeEntryId);
+          const email = entry?.email ?? activeEntryId;
+          console.log(`[${fmt.tag}] Auto-removing deactivated account ${email}`);
+          accountPool.removeAccount(activeEntryId);
+
+          // Try to get another account for retry
+          const retry = accountPool.acquire();
+          if (retry) {
+            activeEntryId = retry.entryId;
+            triedEntryIds.push(retry.entryId);
+            const retryProxyUrl = proxyPool?.resolveProxyUrl(retry.entryId);
+            codexApi = new CodexApi(retry.token, retry.accountId, cookieJar, retry.entryId, retryProxyUrl);
+            console.log(`[${fmt.tag}] Retrying with account ${retry.entryId} after removing deactivated account`);
+            continue; // Retry with new account
+          }
+
+          // No other account available
+          c.status(401);
+          return c.json(fmt.formatError(401, err.message));
+        }
+
         if (err.status === 429) {
           const retryAfterSec = extractRetryAfterSec(err.body);
           accountPool.markRateLimited(activeEntryId, { retryAfterSec, countRequest: true });

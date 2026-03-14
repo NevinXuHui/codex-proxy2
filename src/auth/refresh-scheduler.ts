@@ -19,6 +19,9 @@ import type { AccountPool } from "./account-pool.js";
 /** Errors that indicate the refresh token itself is invalid (permanent failure). */
 const PERMANENT_ERRORS = ["invalid_grant", "invalid_token", "access_denied"];
 
+/** HTTP status codes that indicate permanent refresh failure. */
+const PERMANENT_STATUS_CODES = [302, 401, 403];
+
 const MAX_ATTEMPTS = 5;
 const BASE_DELAY_MS = 5_000;
 const RECOVERY_DELAY_MS = 10 * 60 * 1000; // 10 minutes
@@ -52,7 +55,10 @@ export class RefreshScheduler {
         if (timer.unref) timer.unref();
         this.timers.set(entry.id, timer);
       } else if (entry.status === "expired" && !entry.refreshToken) {
-        console.warn(`[RefreshScheduler] Account ${entry.id}: expired with no refresh_token. Re-login required at /`);
+        const email = entry.email ?? entry.id;
+        console.warn(`[RefreshScheduler] Account ${email}: expired with no refresh_token`);
+        console.log(`[RefreshScheduler] Auto-removing expired account ${email} (no refresh token available)`);
+        this.pool.removeAccount(entry.id);
       }
     }
   }
@@ -115,10 +121,12 @@ export class RefreshScheduler {
     if (!entry) return;
 
     if (!entry.refreshToken) {
+      const email = entry.email ?? entryId;
       console.warn(
-        `[RefreshScheduler] Account ${entryId} has no refresh_token, cannot auto-refresh. Re-login required at /`,
+        `[RefreshScheduler] Account ${email} has no refresh_token, cannot auto-refresh`,
       );
-      this.pool.markStatus(entryId, "expired");
+      console.log(`[RefreshScheduler] Auto-removing expired account ${email} (no refresh token available)`);
+      this.pool.removeAccount(entryId);
       return;
     }
 
@@ -140,11 +148,29 @@ export class RefreshScheduler {
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
 
-        // Check for permanent failures
+        // Check for permanent failures by error message
         if (PERMANENT_ERRORS.some((e) => msg.toLowerCase().includes(e))) {
-          console.error(`[RefreshScheduler] Permanent failure for ${entryId}: ${msg}`);
-          this.pool.markStatus(entryId, "expired");
+          const entry = this.pool.getEntry(entryId);
+          const email = entry?.email ?? entryId;
+          console.error(`[RefreshScheduler] Permanent failure for ${email}: ${msg}`);
+          console.log(`[RefreshScheduler] Auto-removing account ${email} due to permanent refresh failure`);
+          this.pool.removeAccount(entryId);
           return;
+        }
+
+        // Check for permanent failures by HTTP status code (302, 401, 403)
+        // Error format: "Token refresh failed (302): ..."
+        const statusMatch = msg.match(/Token refresh failed \((\d+)\)/);
+        if (statusMatch) {
+          const statusCode = parseInt(statusMatch[1], 10);
+          if (PERMANENT_STATUS_CODES.includes(statusCode)) {
+            const entry = this.pool.getEntry(entryId);
+            const email = entry?.email ?? entryId;
+            console.error(`[RefreshScheduler] Permanent failure (HTTP ${statusCode}) for ${email}: ${msg}`);
+            console.log(`[RefreshScheduler] Auto-removing account ${email} due to refresh failure`);
+            this.pool.removeAccount(entryId);
+            return;
+          }
         }
 
         if (attempt < MAX_ATTEMPTS) {

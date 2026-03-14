@@ -515,8 +515,14 @@ export class AccountPool {
       }
     }
 
-    // Mark expired tokens
+    // Mark expired tokens and auto-remove if no refresh token
     if (entry.status === "active" && isTokenExpired(entry.token)) {
+      if (!entry.refreshToken) {
+        const email = entry.email ?? entry.id;
+        console.log(`[AccountPool] Auto-removing expired account ${email} (no refresh token)`);
+        this.accounts.delete(entry.id);
+        return; // Exit early after deletion
+      }
       entry.status = "expired";
     }
 
