@@ -3,6 +3,7 @@ import { serve } from "@hono/node-server";
 import { loadConfig, loadFingerprint, getConfig } from "./config.js";
 import { AccountPool } from "./auth/account-pool.js";
 import { RefreshScheduler } from "./auth/refresh-scheduler.js";
+import { importTokens } from "./auth/token-importer.js";
 
 import { requestId } from "./middleware/request-id.js";
 import { logger } from "./middleware/logger.js";
@@ -59,6 +60,9 @@ export async function startServer(options?: StartOptions): Promise<ServerHandle>
   const refreshScheduler = new RefreshScheduler(accountPool);
   const cookieJar = new CookieJar();
   const proxyPool = new ProxyPool();
+
+  // Auto-import tokens from token directory
+  importTokens(accountPool, refreshScheduler);
 
   // Create Hono app
   const app = new Hono();

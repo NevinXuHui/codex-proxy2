@@ -6,6 +6,7 @@ import { readdirSync, readFileSync, existsSync } from "fs";
 import { resolve, join } from "path";
 import { getRootDir } from "../paths.js";
 import type { AccountPool } from "./account-pool.js";
+import type { RefreshScheduler } from "./refresh-scheduler.js";
 
 interface TokenFile {
   type: string;
@@ -21,9 +22,10 @@ interface TokenFile {
 /**
  * Import accounts from token directory.
  * @param pool - AccountPool instance
+ * @param scheduler - RefreshScheduler instance
  * @returns Number of accounts imported
  */
-export function importTokens(pool: AccountPool): number {
+export function importTokens(pool: AccountPool, scheduler: RefreshScheduler): number {
   const tokenDir = resolve(getRootDir(), "token");
 
   if (!existsSync(tokenDir)) {
@@ -48,6 +50,7 @@ export function importTokens(pool: AccountPool): number {
 
         // Add account with access_token and refresh_token
         const entryId = pool.addAccount(data.access_token, data.refresh_token || null);
+        scheduler.scheduleOne(entryId, data.access_token);
         console.log(`[TokenImporter] Imported account from ${file} (entryId: ${entryId})`);
         imported++;
       } catch (err) {

@@ -155,6 +155,36 @@ export function useAccounts() {
     setList((prev) => prev.map((a) => a.id === accountId ? { ...a, ...patch } : a));
   }, []);
 
+  const importToken = useCallback(
+    async (tokenData: any, skipRefresh = false) => {
+      setAddInfo("");
+      setAddError("");
+      try {
+        const resp = await fetch("/auth/accounts/import", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(tokenData),
+        });
+        const data = await resp.json();
+        if (resp.ok && data.success) {
+          if (!skipRefresh) {
+            setAddInfo("accountAdded");
+            await loadAccounts();
+          }
+          return { success: true };
+        } else {
+          setAddError(data.error || "Failed to import token file");
+          return { success: false, error: data.error };
+        }
+      } catch (err) {
+        const error = "networkError: " + (err instanceof Error ? err.message : String(err));
+        setAddError(error);
+        return { success: false, error };
+      }
+    },
+    [loadAccounts]
+  );
+
   return {
     list,
     loading,
@@ -167,6 +197,7 @@ export function useAccounts() {
     patchLocal,
     startAdd,
     submitRelay,
+    importToken,
     deleteAccount,
   };
 }

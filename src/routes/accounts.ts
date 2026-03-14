@@ -153,6 +153,37 @@ export function createAccountRoutes(
     return c.json({ success: true, account: added });
   });
 
+  // Import account from token file
+  app.post("/auth/accounts/import", async (c) => {
+    try {
+      const body = await c.req.json<{
+        type: string;
+        email: string;
+        expired: string;
+        id_token: string;
+        account_id: string;
+        access_token: string;
+        last_refresh: string;
+        refresh_token: string;
+      }>();
+
+      if (!body.access_token) {
+        c.status(400);
+        return c.json({ error: "Missing access_token in token file" });
+      }
+
+      const entryId = pool.addAccount(body.access_token, body.refresh_token || null);
+      scheduler.scheduleOne(entryId, body.access_token);
+
+      const accounts = pool.getAccounts();
+      const added = accounts.find((a) => a.id === entryId);
+      return c.json({ success: true, account: added });
+    } catch (err) {
+      c.status(400);
+      return c.json({ error: err instanceof Error ? err.message : "Invalid token file format" });
+    }
+  });
+
   // Remove account
   app.delete("/auth/accounts/:id", (c) => {
     const id = c.req.param("id");
