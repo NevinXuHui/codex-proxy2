@@ -6,7 +6,7 @@
  */
 
 import { execFile, execFileSync, spawn } from "child_process";
-import { existsSync, readFileSync } from "fs";
+import { existsSync, openSync, readFileSync } from "fs";
 import { resolve } from "path";
 import { promisify } from "util";
 import { getRootDir, isEmbedded } from "./paths.js";
@@ -20,18 +20,36 @@ export function setCloseHandler(handler: () => Promise<void>): void {
 }
 
 /**
- * Restart the server: try graceful close (up to 3s), then spawn new process and exit.
- * Works even without a close handler — always spawns and exits.
+ * Restart the server: try graceful close (up to 3s), then spawn the new
+ * server process directly. The new process has built-in EADDRINUSE retry
+ * (in index.ts) so it handles port-release timing automatically.
  */
 function hardRestart(cwd: string): void {
+  const nodeExe = process.argv[0];
+  const serverArgs = process.argv.slice(1);
+
   const doRestart = () => {
-    console.log("[SelfUpdate] Spawning new process and exiting...");
-    const child = spawn(process.argv[0], process.argv.slice(1), {
+    if (!existsSync(nodeExe)) {
+      console.error(`[SelfUpdate] Node executable not found: ${nodeExe}, aborting restart`);
+      return;
+    }
+
+    console.log("[SelfUpdate] Spawning new server process...");
+
+    // Redirect child output to a log file for post-mortem debugging
+    let outFd: number | null = null;
+    try {
+      outFd = openSync(resolve(cwd, ".restart.log"), "w");
+    } catch { /* fall back to ignore */ }
+
+    const child = spawn(nodeExe, serverArgs, {
       detached: true,
-      stdio: "ignore",
+      stdio: ["ignore", outFd ?? "ignore", outFd ?? "ignore"],
       cwd,
     });
     child.unref();
+
+    console.log(`[SelfUpdate] New process spawned (pid: ${child.pid ?? "unknown"}). Exiting...`);
     process.exit(0);
   };
 
@@ -297,34 +315,47 @@ export async function checkProxySelfUpdate(): Promise<ProxySelfUpdateResult> {
   return result;
 }
 
+/** Progress callback for streaming update status. */
+export type UpdateProgressCallback = (step: string, status: "running" | "done" | "error", detail?: string) => void;
+
 /**
  * Apply proxy self-update: git pull + npm install + npm run build.
  * Only works in git (CLI) mode.
+ * @param onProgress Optional callback to report step-by-step progress.
  */
-export async function applyProxySelfUpdate(): Promise<{ started: boolean; restarting?: boolean; error?: string }> {
+export async function applyProxySelfUpdate(
+  onProgress?: UpdateProgressCallback,
+): Promise<{ started: boolean; restarting?: boolean; error?: string }> {
   if (_proxyUpdateInProgress) {
     return { started: false, error: "Update already in progress" };
   }
 
   _proxyUpdateInProgress = true;
   const cwd = process.cwd();
+  const report = onProgress ?? (() => {});
 
   try {
+    report("pull", "running");
     console.log("[SelfUpdate] Pulling latest code...");
-    // Discard local modifications (e.g. package-lock.json drift) that would block git pull
     await execFileAsync("git", ["checkout", "--", "."], { cwd, timeout: 10000 }).catch(() => {});
     await execFileAsync("git", ["pull", "origin", "master"], { cwd, timeout: 60000 });
+    report("pull", "done");
 
+    report("install", "running");
     console.log("[SelfUpdate] Installing dependencies...");
     await execFileAsync("npm", ["install"], { cwd, timeout: 120000, shell: true });
+    report("install", "done");
 
+    report("build", "running");
     console.log("[SelfUpdate] Building...");
     await execFileAsync("npm", ["run", "build"], { cwd, timeout: 120000, shell: true });
+    report("build", "done");
 
-    console.log("[SelfUpdate] Update complete. Restarting in 500ms...");
+    report("restart", "running");
+    console.log("[SelfUpdate] Update complete. Restarting...");
     _proxyUpdateInProgress = false;
 
-    // Delay 500ms to let HTTP response flush, then restart
+    // Delay 500ms to let SSE flush, then restart
     setTimeout(() => hardRestart(cwd), 500);
 
     return { started: true, restarting: true };
