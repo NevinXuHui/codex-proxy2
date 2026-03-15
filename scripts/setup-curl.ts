@@ -82,7 +82,9 @@ async function getDownloadUrl(info: PlatformInfo, version: string): Promise<stri
 
   const resp = await fetch(apiUrl);
   if (!resp.ok) {
-    throw new Error(`GitHub API returned ${resp.status}: ${await resp.text()}`);
+    console.warn(`[setup] GitHub API failed (${resp.status}), using direct download URL`);
+    // Fallback: construct direct download URL
+    return constructDirectDownloadUrl(info, version);
   }
 
   const release = (await resp.json()) as { assets: { name: string; browser_download_url: string }[] };
@@ -103,6 +105,29 @@ async function getDownloadUrl(info: PlatformInfo, version: string): Promise<stri
 
   console.log(`[setup] Found asset: ${asset.name}`);
   return asset.browser_download_url;
+}
+
+function constructDirectDownloadUrl(info: PlatformInfo, version: string): string {
+  const platform = process.platform;
+  const arch = process.arch;
+
+  let filename: string;
+
+  if (platform === "linux") {
+    const archStr = arch === "arm64" ? "aarch64-linux-gnu" : "x86_64-linux-gnu";
+    filename = `curl-impersonate-${version}.${archStr}.tar.gz`;
+  } else if (platform === "darwin") {
+    const archStr = arch === "arm64" ? "arm64-macos" : "x86_64-macos";
+    filename = `curl-impersonate-${version}.${archStr}.tar.gz`;
+  } else if (platform === "win32") {
+    filename = `libcurl-impersonate-${version}.x86_64-win32.tar.gz`;
+  } else {
+    throw new Error(`Unsupported platform: ${platform}-${arch}`);
+  }
+
+  const url = `https://github.com/${REPO}/releases/download/${version}/${filename}`;
+  console.log(`[setup] Constructed direct URL: ${url}`);
+  return url;
 }
 
 function downloadAndExtract(url: string, info: PlatformInfo): void {

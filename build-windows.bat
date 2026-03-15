@@ -33,42 +33,15 @@ if %ERRORLEVEL% NEQ 0 (
 )
 
 echo.
-echo Step 3: Downloading Windows curl-impersonate...
+echo Step 3: Setting up curl-impersonate...
 echo.
 
-REM Create bin directory if not exists
-if not exist "bin" mkdir bin
-
-REM Check if curl-impersonate already exists
-if exist "bin\curl-impersonate.exe" (
-    echo curl-impersonate.exe already exists, skipping download
-    goto :build_complete
-)
-
-echo Downloading curl-impersonate for Windows...
-set CURL_VERSION=v0.7.2
-set CURL_WIN_URL=https://github.com/lwthiker/curl-impersonate/releases/download/%CURL_VERSION%/curl-impersonate-%CURL_VERSION%.x86_64-pc-windows-msvc.zip
-set CURL_WIN_ZIP=bin\curl-impersonate-windows.zip
-
-REM Download using PowerShell
-powershell -Command "Invoke-WebRequest -Uri '%CURL_WIN_URL%' -OutFile '%CURL_WIN_ZIP%'"
+REM Use the setup script to download curl-impersonate
+call npm run setup
 if %ERRORLEVEL% NEQ 0 (
-    echo Error: Failed to download curl-impersonate
-    exit /b 1
+    echo Warning: curl-impersonate setup failed, but build can continue
+    echo You may need to run 'npm run setup' manually later
 )
-
-echo Extracting...
-powershell -Command "Expand-Archive -Path '%CURL_WIN_ZIP%' -DestinationPath 'bin\' -Force"
-
-REM Find and rename the curl executable
-for /r bin %%f in (curl-impersonate-chrome*.exe) do (
-    move "%%f" "bin\curl-impersonate.exe" >nul 2>nul
-)
-
-REM Clean up
-del "%CURL_WIN_ZIP%" >nul 2>nul
-
-echo curl-impersonate.exe installed successfully
 
 :build_complete
 echo.

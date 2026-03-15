@@ -30,34 +30,14 @@ echo ""
 npx tsc
 
 echo ""
-echo "Step 3: Downloading Windows curl-impersonate..."
+echo "Step 3: Setting up curl-impersonate..."
 echo ""
 
-# Create bin directory if not exists
-mkdir -p bin
-
-# Download curl-impersonate for Windows
-CURL_VERSION="v0.7.2"
-CURL_WIN_URL="https://github.com/lwthiker/curl-impersonate/releases/download/${CURL_VERSION}/curl-impersonate-${CURL_VERSION}.x86_64-pc-windows-msvc.zip"
-CURL_WIN_ZIP="bin/curl-impersonate-windows.zip"
-
-if [ ! -f "bin/curl-impersonate.exe" ]; then
-  echo "Downloading curl-impersonate for Windows..."
-  curl -L -o "$CURL_WIN_ZIP" "$CURL_WIN_URL"
-
-  echo "Extracting..."
-  unzip -o "$CURL_WIN_ZIP" -d bin/
-
-  # Find and rename the curl executable
-  find bin/ -name "curl-impersonate-chrome*.exe" -exec mv {} bin/curl-impersonate.exe \;
-
-  # Clean up
-  rm -f "$CURL_WIN_ZIP"
-
-  echo "curl-impersonate.exe installed successfully"
-else
-  echo "curl-impersonate.exe already exists, skipping download"
-fi
+# Use the setup script to download curl-impersonate
+npm run setup || {
+  echo "Warning: curl-impersonate setup failed, but build can continue"
+  echo "You may need to run 'npm run setup' manually later"
+}
 
 echo ""
 echo "=== Build Complete ==="
