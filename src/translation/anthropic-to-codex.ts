@@ -11,6 +11,7 @@ import type {
 import { parseModelName, getModelInfo } from "../models/model-store.js";
 import { getConfig } from "../config.js";
 import { buildInstructions, budgetToEffort } from "./shared-utils.js";
+import type { ModelConfigOverride } from "./shared-utils.js";
 import { anthropicToolsToCodex, anthropicToolChoiceToCodex } from "./tool-format.js";
 
 /**
@@ -118,13 +119,29 @@ function contentToInputItems(
     } else if (block.type === "tool_result") {
       const toolUseId = typeof block.tool_use_id === "string" ? block.tool_use_id : "unknown";
       let resultText = "";
+      const imageParts: CodexContentPart[] = [];
       if (typeof block.content === "string") {
         resultText = block.content;
       } else if (Array.isArray(block.content)) {
-        resultText = (block.content as Array<{ text?: string }>)
-          .filter((b) => typeof b.text === "string")
-          .map((b) => b.text!)
+        const blocks = block.content as Array<Record<string, unknown>>;
+        resultText = blocks
+          .filter((b) => b.type === "text" && typeof b.text === "string")
+          .map((b) => b.text as string)
           .join("\n");
+        // Extract image blocks for a follow-up user message
+        for (const b of blocks) {
+          if (b.type === "image") {
+            const source = b.source as
+              | { type: string; media_type: string; data: string }
+              | undefined;
+            if (source?.type === "base64" && source.media_type && source.data) {
+              imageParts.push({
+                type: "input_image",
+                image_url: `data:${source.media_type};base64,${source.data}`,
+              });
+            }
+          }
+        }
       }
       if (block.is_error) {
         resultText = `Error: ${resultText}`;
@@ -134,6 +151,11 @@ function contentToInputItems(
         call_id: toolUseId,
         output: resultText,
       });
+      // Codex function_call_output is string-only; inject images as a
+      // subsequent user message so the model can still see them.
+      if (imageParts.length > 0) {
+        items.push({ role: "user", content: imageParts });
+      }
     }
   }
 
@@ -151,6 +173,7 @@ function contentToInputItems(
  */
 export function translateAnthropicToCodexRequest(
   req: AnthropicMessagesRequest,
+  modelConfig?: ModelConfigOverride,
 ): CodexResponsesRequest {
   // Extract system instructions
   let userInstructions: string;
@@ -163,7 +186,8 @@ export function translateAnthropicToCodexRequest(
   } else {
     userInstructions = "You are a helpful assistant.";
   }
-  const instructions = buildInstructions(userInstructions);
+  const cfg = modelConfig ?? getConfig().model;
+  const instructions = buildInstructions(userInstructions, cfg);
 
   // Build input items from messages
   const input: CodexInputItem[] = [];
@@ -184,7 +208,6 @@ export function translateAnthropicToCodexRequest(
   const parsed = parseModelName(req.model);
   const modelId = parsed.modelId;
   const modelInfo = getModelInfo(modelId);
-  const config = getConfig();
 
   // Convert tools to Codex format
   const codexTools = req.tools?.length ? anthropicToolsToCodex(req.tools) : [];
@@ -211,13 +234,13 @@ export function translateAnthropicToCodexRequest(
     thinkingEffort ??
     parsed.reasoningEffort ??
     modelInfo?.defaultReasoningEffort ??
-    config.model.default_reasoning_effort;
+    cfg.default_reasoning_effort;
   request.reasoning = { summary: "auto", ...(effort ? { effort } : {}) };
 
   // Service tier: suffix > config default
   const serviceTier =
     parsed.serviceTier ??
-    config.model.default_service_tier ??
+    cfg.default_service_tier ??
     null;
   if (serviceTier) {
     request.service_tier = serviceTier;

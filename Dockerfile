@@ -36,11 +36,15 @@ EXPOSE 8080
 # Ensure data dir exists in the image (bind mount may override at runtime)
 RUN mkdir -p /app/data
 
+# Backup default configs so entrypoint can seed empty bind mounts
+RUN cp -r /app/config /defaults
+
 COPY docker-entrypoint.sh /
-RUN chmod +x /docker-entrypoint.sh
+COPY docker-healthcheck.sh /
+RUN chmod +x /docker-entrypoint.sh /docker-healthcheck.sh
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-  CMD curl -fs http://localhost:8080/health || exit 1
+  CMD /docker-healthcheck.sh
 
 ENTRYPOINT ["/docker-entrypoint.sh"]
 CMD ["node", "dist/index.js"]

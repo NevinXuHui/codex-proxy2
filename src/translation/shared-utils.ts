@@ -7,7 +7,15 @@
 import { readFileSync } from "fs";
 import { resolve } from "path";
 import { getConfig } from "../config.js";
+import type { AppConfig } from "../config.js";
 import { getConfigDir } from "../paths.js";
+import { hasTupleSchemas, convertTupleSchemas } from "./tuple-schema.js";
+
+/** Subset of model config used by translation functions. */
+export type ModelConfigOverride = Pick<
+  AppConfig["model"],
+  "default_reasoning_effort" | "default_service_tier" | "inject_desktop_context" | "suppress_desktop_directives"
+>;
 
 let cachedDesktopContext: string | null = null;
 
@@ -41,10 +49,15 @@ const SUPPRESS_PROMPT =
  * When suppress_desktop_directives is enabled, appends a suppress prompt
  * to override desktop-specific behaviors.
  */
-export function buildInstructions(userInstructions: string): string {
+export function buildInstructions(
+  userInstructions: string,
+  modelConfig?: Pick<ModelConfigOverride, "inject_desktop_context" | "suppress_desktop_directives">,
+): string {
+  const cfg = modelConfig ?? getConfig().model;
+  if (!cfg.inject_desktop_context) return userInstructions;
   const ctx = getDesktopContext();
   if (!ctx) return userInstructions;
-  if (getConfig().model.suppress_desktop_directives) {
+  if (cfg.suppress_desktop_directives) {
     return `${ctx}\n\n${SUPPRESS_PROMPT}\n\n${userInstructions}`;
   }
   return `${ctx}\n\n${userInstructions}`;
@@ -73,6 +86,25 @@ export function injectAdditionalProperties(
   schema: Record<string, unknown>,
 ): Record<string, unknown> {
   return walkSchema(structuredClone(schema), new Set());
+}
+
+/**
+ * Prepare a JSON Schema for Codex: convert tuple schemas (prefixItems) to
+ * equivalent object schemas, then inject additionalProperties: false.
+ *
+ * Returns the converted schema and the original (pre-conversion) schema if
+ * tuples were found (needed for response-side reconversion), or null otherwise.
+ */
+export function prepareSchema(
+  schema: Record<string, unknown>,
+): { schema: Record<string, unknown>; originalSchema: Record<string, unknown> | null } {
+  const cloned = structuredClone(schema);
+  if (!hasTupleSchemas(cloned)) {
+    return { schema: walkSchema(cloned, new Set()), originalSchema: null };
+  }
+  const originalSchema = structuredClone(schema);
+  convertTupleSchemas(cloned);
+  return { schema: walkSchema(cloned, new Set()), originalSchema };
 }
 
 function walkSchema(node: Record<string, unknown>, seen: Set<object>): Record<string, unknown> {

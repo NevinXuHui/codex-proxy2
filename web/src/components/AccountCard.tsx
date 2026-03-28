@@ -1,4 +1,4 @@
-import { useCallback } from "preact/hooks";
+import { useCallback, useState } from "preact/hooks";
 import { useT, useI18n } from "../../../shared/i18n/context";
 import type { TranslationKey } from "../../../shared/i18n/translations";
 import { formatNumber, formatResetTime, formatWindowDuration } from "../../../shared/utils/format";
@@ -21,6 +21,10 @@ const statusStyles: Record<string, [string, string]> = {
     "bg-red-100 text-red-600 border-red-200 dark:bg-red-900/20 dark:text-red-400 dark:border-red-800/30",
     "expired",
   ],
+  quota_exhausted: [
+    "bg-orange-100 text-orange-700 border-orange-200 dark:bg-orange-900/20 dark:text-orange-400 dark:border-orange-800/30",
+    "quotaExhausted",
+  ],
   rate_limited: [
     "bg-amber-100 text-amber-700 border-amber-200 dark:bg-amber-900/20 dark:text-amber-400 dark:border-amber-800/30",
     "rateLimited",
@@ -33,6 +37,10 @@ const statusStyles: Record<string, [string, string]> = {
     "bg-slate-100 text-slate-500 border-slate-200 dark:bg-slate-800/30 dark:text-slate-400 dark:border-slate-700/30",
     "disabled",
   ],
+  banned: [
+    "bg-rose-100 text-rose-700 border-rose-300 dark:bg-rose-900/30 dark:text-rose-400 dark:border-rose-800/40",
+    "banned",
+  ],
 };
 
 interface AccountCardProps {
@@ -41,9 +49,14 @@ interface AccountCardProps {
   onDelete: (id: string) => Promise<string | null>;
   proxies?: ProxyEntry[];
   onProxyChange?: (accountId: string, proxyId: string) => void;
+  selected?: boolean;
+  onToggleSelect?: (id: string) => void;
+  onRefreshQuota?: (id: string) => Promise<void>;
+  onToggleStatus?: (id: string, currentStatus: string) => Promise<string | null>;
+  onUpdateLabel?: (id: string, label: string | null) => Promise<string | null>;
 }
 
-export function AccountCard({ account, index, onDelete, proxies, onProxyChange }: AccountCardProps) {
+export function AccountCard({ account, index, onDelete, proxies, onProxyChange, selected, onToggleSelect, onRefreshQuota, onToggleStatus, onUpdateLabel }: AccountCardProps) {
   const t = useT();
   const { lang } = useI18n();
   const email = account.email || "Unknown";
@@ -66,10 +79,12 @@ export function AccountCard({ account, index, onDelete, proxies, onProxyChange }
     if (err) alert(err);
   }, [account.id, onDelete, t]);
 
-  // Quota — primary window
+  // Quota — primary window (default 0% used = 100% available for accounts without data)
   const q = account.quota;
   const rl = q?.rate_limit;
-  const pct = rl?.used_percent != null ? Math.round(rl.used_percent) : null;
+  const pct = rl?.limit_reached ? 100
+    : rl?.used_percent != null ? Math.round(rl.used_percent)
+    : (account.status === "active" ? 0 : null);
   const barColor =
     pct == null ? "bg-primary" : pct >= 90 ? "bg-red-500" : pct >= 60 ? "bg-amber-500" : "bg-primary";
   const pctColor =
@@ -84,7 +99,9 @@ export function AccountCard({ account, index, onDelete, proxies, onProxyChange }
 
   // Quota — secondary window (e.g. weekly)
   const srl = q?.secondary_rate_limit;
-  const sPct = srl?.used_percent != null ? Math.round(srl.used_percent) : null;
+  const sPct = srl?.limit_reached ? 100
+    : srl?.used_percent != null ? Math.round(srl.used_percent)
+    : null;
   const sBarColor =
     sPct == null ? "bg-indigo-500" : sPct >= 90 ? "bg-red-500" : sPct >= 60 ? "bg-amber-500" : "bg-indigo-500";
   const sPctColor =
@@ -99,18 +116,108 @@ export function AccountCard({ account, index, onDelete, proxies, onProxyChange }
   const sWindowSec = srl?.limit_window_seconds;
   const sWindowDur = sWindowSec ? formatWindowDuration(sWindowSec, lang === "zh") : null;
 
+  const [quotaRefreshing, setQuotaRefreshing] = useState(false);
+
+  const handleRefreshQuota = useCallback(async () => {
+    if (!onRefreshQuota) return;
+    setQuotaRefreshing(true);
+    try {
+      await onRefreshQuota(account.id);
+    } finally {
+      setQuotaRefreshing(false);
+    }
+  }, [account.id, onRefreshQuota]);
+
+  const handleToggle = useCallback(() => {
+    onToggleSelect?.(account.id);
+  }, [account.id, onToggleSelect]);
+
+  const [statusToggling, setStatusToggling] = useState(false);
+  const isEnabled = account.status !== "disabled";
+  const canToggle = account.status === "active" || account.status === "disabled" || account.status === "rate_limited" || account.status === "refreshing" || account.status === "quota_exhausted";
+
+  const handleStatusToggle = useCallback(async () => {
+    if (!onToggleStatus || !canToggle) return;
+    setStatusToggling(true);
+    try {
+      const err = await onToggleStatus(account.id, account.status);
+      if (err) console.error(err);
+    } finally {
+      setStatusToggling(false);
+    }
+  }, [account.id, account.status, canToggle, onToggleStatus]);
+
+  const [editingLabel, setEditingLabel] = useState(false);
+  const [labelDraft, setLabelDraft] = useState(account.label || "");
+
+  const handleLabelEdit = useCallback(() => {
+    setLabelDraft(account.label || "");
+    setEditingLabel(true);
+  }, [account.label]);
+
+  const handleLabelSave = useCallback(async () => {
+    if (!onUpdateLabel) return;
+    const trimmed = labelDraft.trim();
+    const newLabel = trimmed || null;
+    const err = await onUpdateLabel(account.id, newLabel);
+    if (err) console.error(err);
+    setEditingLabel(false);
+  }, [account.id, labelDraft, onUpdateLabel]);
+
+  const handleLabelKeyDown = useCallback((e: KeyboardEvent) => {
+    if (e.key === "Enter") handleLabelSave();
+    if (e.key === "Escape") setEditingLabel(false);
+  }, [handleLabelSave]);
+
   return (
-    <div class="bg-white dark:bg-card-dark border border-gray-200 dark:border-border-dark rounded-xl p-4 shadow-sm hover:shadow-md transition-all hover:border-primary/30 dark:hover:border-primary/50">
+    <div class={`bg-white dark:bg-card-dark border rounded-xl p-4 shadow-sm hover:shadow-md transition-all ${selected ? "border-primary ring-1 ring-primary/30" : "border-gray-200 dark:border-border-dark hover:border-primary/30 dark:hover:border-primary/50"}`}>
       {/* Header */}
-      <div class="flex justify-between items-start mb-4">
-        <div class="flex items-center gap-3">
+      <div class="flex flex-wrap justify-between items-start gap-2 mb-4">
+        <div class="flex items-center gap-3 min-w-0 flex-1">
+          {onToggleSelect && (
+            <input
+              type="checkbox"
+              checked={selected}
+              onChange={handleToggle}
+              class="size-4 rounded border-gray-300 dark:border-border-dark text-primary focus:ring-primary/50 cursor-pointer shrink-0"
+            />
+          )}
           <div class={`size-10 rounded-full ${bgColor} ${textColor} flex items-center justify-center font-bold text-lg`}>
             {initial}
           </div>
-          <div>
-            <h3 class="text-[0.82rem] font-semibold leading-tight">{email}</h3>
-            <p class="text-xs text-slate-500 dark:text-text-dim">
-              {plan}
+          <div class="min-w-0">
+            {editingLabel ? (
+              <input
+                type="text"
+                value={labelDraft}
+                onInput={(e) => setLabelDraft((e.target as HTMLInputElement).value)}
+                onKeyDown={handleLabelKeyDown}
+                onBlur={handleLabelSave}
+                maxLength={64}
+                placeholder={t("labelPlaceholder")}
+                class="text-[0.82rem] font-semibold leading-tight w-full px-1.5 py-0.5 -ml-1.5 rounded border border-primary bg-white dark:bg-bg-dark text-slate-700 dark:text-text-main focus:outline-none focus:ring-1 focus:ring-primary"
+                autoFocus
+              />
+            ) : (
+              <div class="flex items-center gap-1 group">
+                <h3 class="text-[0.82rem] font-semibold leading-tight truncate">
+                  {account.label || email}
+                </h3>
+                {onUpdateLabel && (
+                  <button
+                    onClick={handleLabelEdit}
+                    class="p-0.5 text-slate-300 dark:text-text-dim/50 opacity-0 group-hover:opacity-100 hover:text-primary transition-all shrink-0"
+                    title={t("editLabel")}
+                  >
+                    <svg class="size-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                      <path stroke-linecap="round" stroke-linejoin="round" d="m16.862 4.487 1.687-1.688a1.875 1.875 0 1 1 2.652 2.652L10.582 16.07a4.5 4.5 0 0 1-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 0 1 1.13-1.897l8.932-8.931Zm0 0L19.5 7.125" />
+                    </svg>
+                  </button>
+                )}
+              </div>
+            )}
+            <p class="text-xs text-slate-500 dark:text-text-dim truncate">
+              {account.label ? `${email} · ${plan}` : plan}
               {windowDur && (
                 <span class="ml-1.5 px-1.5 py-0.5 rounded bg-slate-100 dark:bg-border-dark text-slate-500 dark:text-text-dim text-[0.65rem] font-medium">
                   {windowDur}
@@ -119,10 +226,38 @@ export function AccountCard({ account, index, onDelete, proxies, onProxyChange }
             </p>
           </div>
         </div>
-        <div class="flex items-center gap-2">
+        <div class="flex items-center gap-2 shrink-0 flex-wrap">
+          {onToggleStatus && (
+            <button
+              onClick={handleStatusToggle}
+              disabled={!canToggle || statusToggling}
+              title={canToggle ? (isEnabled ? t("disableAccount") : t("enableAccount")) : undefined}
+              class={`relative inline-flex h-5 w-9 shrink-0 rounded-full border-2 border-transparent transition-colors duration-200 focus:outline-none ${
+                !canToggle ? "opacity-40 cursor-not-allowed" : "cursor-pointer"
+              } ${isEnabled ? "bg-primary" : "bg-slate-300 dark:bg-slate-600"}`}
+            >
+              <span
+                class={`pointer-events-none inline-block h-4 w-4 rounded-full bg-white dark:bg-slate-200 shadow transform transition-transform duration-200 ${
+                  isEnabled ? "translate-x-4" : "translate-x-0"
+                }`}
+              />
+            </button>
+          )}
           <span class={`px-2.5 py-1 rounded-full ${statusCls} text-xs font-medium border`}>
             {t(statusKey as TranslationKey)}
           </span>
+          {onRefreshQuota && (
+            <button
+              onClick={handleRefreshQuota}
+              disabled={quotaRefreshing}
+              class="p-1.5 text-slate-400 dark:text-text-dim hover:text-amber-500 transition-colors rounded-md hover:bg-amber-50 dark:hover:bg-amber-900/20 disabled:opacity-40"
+              title={t("refreshQuota")}
+            >
+              <svg class="size-[16px]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0 3.181 3.183a8.25 8.25 0 0 0 13.803-3.7M4.031 9.865a8.25 8.25 0 0 1 13.803-3.7l3.181 3.182m0-4.991v4.99" />
+              </svg>
+            </button>
+          )}
           <button
             onClick={handleDelete}
             class="p-1.5 text-slate-400 dark:text-text-dim hover:text-red-500 transition-colors rounded-md hover:bg-red-50 dark:hover:bg-red-900/20"
@@ -176,10 +311,10 @@ export function AccountCard({ account, index, onDelete, proxies, onProxyChange }
       )}
 
       {/* Quota bars */}
-      {(rl || srl) && (
+      {(rl || srl || account.status === "active") && (
         <div class="pt-3 mt-3 border-t border-slate-100 dark:border-border-dark space-y-3">
           {/* Primary window */}
-          {rl && (
+          {(rl || account.status === "active") && (
             <div>
               <div class="flex justify-between text-[0.78rem] mb-1.5">
                 <span class="text-slate-500 dark:text-text-dim">
@@ -188,7 +323,7 @@ export function AccountCard({ account, index, onDelete, proxies, onProxyChange }
                     <span class="ml-1 text-slate-400 dark:text-text-dim/70 text-[0.65rem]">({windowDur})</span>
                   )}
                 </span>
-                {rl.limit_reached ? (
+                {rl?.limit_reached ? (
                   <span class="px-2 py-0.5 rounded-full bg-red-100 dark:bg-red-900/20 text-red-600 dark:text-red-400 text-xs font-medium">
                     {t("limitReached")}
                   </span>

@@ -15,6 +15,10 @@ const statusStyles: Record<string, [string, TranslationKey]> = {
     "bg-red-100 text-red-600 border-red-200 dark:bg-red-900/20 dark:text-red-400 dark:border-red-800/30",
     "expired",
   ],
+  quota_exhausted: [
+    "bg-orange-100 text-orange-700 border-orange-200 dark:bg-orange-900/20 dark:text-orange-400 dark:border-orange-800/30",
+    "quotaExhausted",
+  ],
   rate_limited: [
     "bg-amber-100 text-amber-700 border-amber-200 dark:bg-amber-900/20 dark:text-amber-400 dark:border-amber-800/30",
     "rateLimited",
@@ -27,17 +31,22 @@ const statusStyles: Record<string, [string, TranslationKey]> = {
     "bg-slate-100 text-slate-500 border-slate-200 dark:bg-slate-800/30 dark:text-slate-400 dark:border-slate-700/30",
     "disabled",
   ],
+  banned: [
+    "bg-rose-100 text-rose-700 border-rose-300 dark:bg-rose-900/30 dark:text-rose-400 dark:border-rose-800/40",
+    "banned",
+  ],
 };
 
 interface AccountTableProps {
   accounts: AssignmentAccount[];
-  proxies: ProxyEntry[];
+  proxies?: ProxyEntry[];
   selectedIds: Set<string>;
   onSelectionChange: (ids: Set<string>) => void;
-  onSingleProxyChange: (accountId: string, proxyId: string) => void;
-  filterGroup: string | null;
+  onSingleProxyChange?: (accountId: string, proxyId: string) => void;
+  filterGroup?: string | null;
   statusFilter: string;
   onStatusFilterChange: (status: string) => void;
+  onToggleStatus?: (id: string, currentStatus: string) => Promise<string | null>;
 }
 
 export function AccountTable({
@@ -46,11 +55,13 @@ export function AccountTable({
   selectedIds,
   onSelectionChange,
   onSingleProxyChange,
-  filterGroup,
+  filterGroup = null,
   statusFilter,
   onStatusFilterChange,
+  onToggleStatus,
 }: AccountTableProps) {
   const t = useT();
+  const showProxy = !!proxies;
   const [search, setSearch] = useState("");
   const [page, setPage] = useState(0);
   const lastClickedIndex = useRef<number | null>(null);
@@ -71,7 +82,7 @@ export function AccountTable({
   // By search
   if (search) {
     const lower = search.toLowerCase();
-    filtered = filtered.filter((a) => a.email.toLowerCase().includes(lower));
+    filtered = filtered.filter((a) => a.email.toLowerCase().includes(lower) || (a.label && a.label.toLowerCase().includes(lower)));
   }
 
   const totalCount = filtered.length;
@@ -158,7 +169,9 @@ export function AccountTable({
           <option value="all">{t("allStatuses")}</option>
           <option value="active">{t("active")}</option>
           <option value="expired">{t("expired")}</option>
+          <option value="quota_exhausted">{t("quotaExhausted")}</option>
           <option value="rate_limited">{t("rateLimited")}</option>
+          <option value="banned">{t("banned")}</option>
           <option value="disabled">{t("disabled")}</option>
         </select>
       </div>
@@ -177,7 +190,8 @@ export function AccountTable({
           </label>
           <span class="flex-1 min-w-0">Email</span>
           <span class="w-20 text-center hidden sm:block">{t("statusFilter")}</span>
-          <span class="w-40 text-center hidden md:block">{t("proxyAssignment")}</span>
+          {onToggleStatus && <span class="w-12 text-center hidden sm:block" />}
+          {showProxy && <span class="w-40 text-center hidden md:block">{t("proxyAssignment")}</span>}
         </div>
 
         {/* Rows */}
@@ -212,30 +226,54 @@ export function AccountTable({
                   />
                 </label>
                 <span class="flex-1 min-w-0 text-sm font-medium truncate text-slate-700 dark:text-text-main">
-                  {acct.email}
+                  {acct.label ? `${acct.label} (${acct.email})` : acct.email}
                 </span>
                 <span class="w-20 hidden sm:flex justify-center">
                   <span class={`px-2 py-0.5 rounded-full text-[0.65rem] font-medium border ${statusCls}`}>
                     {t(statusKey)}
                   </span>
                 </span>
-                <span class="w-40 hidden md:block" onClick={(e) => e.stopPropagation()}>
-                  <select
-                    value={acct.proxyId || "global"}
-                    onChange={(e) => onSingleProxyChange(acct.id, (e.target as HTMLSelectElement).value)}
-                    class="w-full text-xs px-2 py-1 rounded-md border border-gray-200 dark:border-border-dark bg-white dark:bg-bg-dark text-slate-700 dark:text-text-main focus:outline-none focus:ring-1 focus:ring-primary cursor-pointer"
-                  >
-                    <option value="global">{t("globalDefault")}</option>
-                    <option value="direct">{t("directNoProxy")}</option>
-                    <option value="auto">{t("autoRoundRobin")}</option>
-                    {proxies.map((p) => (
-                      <option key={p.id} value={p.id}>
-                        {p.name}
-                        {p.health?.exitIp ? ` (${p.health.exitIp})` : ""}
-                      </option>
-                    ))}
-                  </select>
-                </span>
+                {onToggleStatus && (() => {
+                  const isEnabled = acct.status !== "disabled";
+                  const canToggle = acct.status === "active" || acct.status === "disabled" || acct.status === "rate_limited" || acct.status === "refreshing" || acct.status === "quota_exhausted";
+                  return (
+                    <span class="w-12 hidden sm:flex justify-center" onClick={(e) => e.stopPropagation()}>
+                      <button
+                        onClick={() => { if (canToggle) onToggleStatus(acct.id, acct.status); }}
+                        disabled={!canToggle}
+                        title={canToggle ? (isEnabled ? t("disableAccount") : t("enableAccount")) : undefined}
+                        class={`relative inline-flex h-4 w-7 shrink-0 rounded-full border-2 border-transparent transition-colors duration-200 focus:outline-none ${
+                          !canToggle ? "opacity-40 cursor-not-allowed" : "cursor-pointer"
+                        } ${isEnabled ? "bg-primary" : "bg-slate-300 dark:bg-slate-600"}`}
+                      >
+                        <span
+                          class={`pointer-events-none inline-block h-3 w-3 rounded-full bg-white dark:bg-slate-200 shadow transform transition-transform duration-200 ${
+                            isEnabled ? "translate-x-3" : "translate-x-0"
+                          }`}
+                        />
+                      </button>
+                    </span>
+                  );
+                })()}
+                {showProxy && (
+                  <span class="w-40 hidden md:block" onClick={(e) => e.stopPropagation()}>
+                    <select
+                      value={acct.proxyId || "global"}
+                      onChange={(e) => onSingleProxyChange?.(acct.id, (e.target as HTMLSelectElement).value)}
+                      class="w-full text-xs px-2 py-1 rounded-md border border-gray-200 dark:border-border-dark bg-white dark:bg-bg-dark text-slate-700 dark:text-text-main focus:outline-none focus:ring-1 focus:ring-primary cursor-pointer"
+                    >
+                      <option value="global">{t("globalDefault")}</option>
+                      <option value="direct">{t("directNoProxy")}</option>
+                      <option value="auto">{t("autoRoundRobin")}</option>
+                      {proxies.map((p) => (
+                        <option key={p.id} value={p.id}>
+                          {p.name}
+                          {p.health?.exitIp ? ` (${p.health.exitIp})` : ""}
+                        </option>
+                      ))}
+                    </select>
+                  </span>
+                )}
               </div>
             );
           })

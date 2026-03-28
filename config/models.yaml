@@ -7,28 +7,13 @@
 # Dynamic fetch merges with static; backend entries win for shared IDs.
 # Models endpoint now requires ?client_version= query parameter.
 #
-# Last updated: 2026-03-16 (added gpt-5.3, gpt-5.4 mappings)
+# Last updated: 2026-03-22 (gpt-5.4 family restored to backend)
 
 models:
-  # ── GPT-5.4 Codex ─────────────────────────────────────────────────
-  - id: gpt-5.4-codex
-    displayName: GPT-5.4 Codex
-    description: Latest GPT-5.4 Codex model with enhanced coding capabilities
-    isDefault: false
-    supportedReasoningEfforts:
-      - { reasoningEffort: low,    description: "Fast responses with lighter reasoning" }
-      - { reasoningEffort: medium, description: "Balances speed and reasoning depth" }
-      - { reasoningEffort: high,   description: "Greater reasoning depth for complex problems" }
-      - { reasoningEffort: xhigh,  description: "Extra high reasoning depth" }
-    defaultReasoningEffort: medium
-    inputModalities: [text, image]
-    supportsPersonality: true
-    upgrade: null
-
-  # ── GPT-5.4 (latest) ──────────────────────────────────────────────
+  # ── GPT-5.4 family (current flagship) ───────────────────────────────
   - id: gpt-5.4
     displayName: GPT-5.4
-    description: Latest GPT-5.4 model with enhanced capabilities
+    description: Latest frontier agentic coding model
     isDefault: false
     supportedReasoningEfforts:
       - { reasoningEffort: low,    description: "Fast responses with lighter reasoning" }
@@ -37,13 +22,27 @@ models:
       - { reasoningEffort: xhigh,  description: "Extra high reasoning depth" }
     defaultReasoningEffort: medium
     inputModalities: [text, image]
-    supportsPersonality: true
+    supportsPersonality: false
     upgrade: null
 
-  # ── GPT-5.3 Codex ─────────────────────────────────────────────────
+  - id: gpt-5.4-mini
+    displayName: GPT-5.4 Mini
+    description: Smaller frontier agentic coding model
+    isDefault: false
+    supportedReasoningEfforts:
+      - { reasoningEffort: low,    description: "Fast responses with lighter reasoning" }
+      - { reasoningEffort: medium, description: "Balances speed and reasoning depth" }
+      - { reasoningEffort: high,   description: "Greater reasoning depth for complex problems" }
+      - { reasoningEffort: xhigh,  description: "Extra high reasoning depth" }
+    defaultReasoningEffort: medium
+    inputModalities: [text, image]
+    supportsPersonality: false
+    upgrade: null
+
+  # ── GPT-5.3 Codex ──────────────────────────────────────────────────
   - id: gpt-5.3-codex
     displayName: GPT-5.3 Codex
-    description: GPT-5.3 Codex model with advanced coding and reasoning
+    description: Frontier Codex-optimized agentic coding model
     isDefault: false
     supportedReasoningEfforts:
       - { reasoningEffort: low,    description: "Fast responses with lighter reasoning" }
@@ -52,25 +51,10 @@ models:
       - { reasoningEffort: xhigh,  description: "Extra high reasoning depth" }
     defaultReasoningEffort: medium
     inputModalities: [text, image]
-    supportsPersonality: true
+    supportsPersonality: false
     upgrade: null
 
-  # ── GPT-5.3 ───────────────────────────────────────────────────────
-  - id: gpt-5.3
-    displayName: GPT-5.3
-    description: GPT-5.3 model with advanced reasoning
-    isDefault: false
-    supportedReasoningEfforts:
-      - { reasoningEffort: low,    description: "Fast responses with lighter reasoning" }
-      - { reasoningEffort: medium, description: "Balances speed and reasoning depth" }
-      - { reasoningEffort: high,   description: "Greater reasoning depth for complex problems" }
-      - { reasoningEffort: xhigh,  description: "Extra high reasoning depth" }
-    defaultReasoningEffort: medium
-    inputModalities: [text, image]
-    supportsPersonality: true
-    upgrade: null
-
-  # ── GPT-5.2 Codex (current flagship) ────────────────────────────────
+  # ── GPT-5.2 Codex ──────────────────────────────────────────────────
   - id: gpt-5.2-codex
     displayName: GPT-5.2 Codex
     description: Frontier agentic coding model
@@ -222,7 +206,3 @@ models:
 
 aliases:
   codex: "gpt-5.2-codex"
-  gpt5.3: "gpt-5.3"
-  gpt5.4: "gpt-5.4"
-  gpt-5.3-codex: "gpt-5.3-codex"
-  gpt-5.4-codex: "gpt-5.4-codex"

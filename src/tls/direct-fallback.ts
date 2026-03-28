@@ -31,8 +31,29 @@ export function isProxyNetworkError(error: unknown): boolean {
     msg.includes("schannel") ||
     msg.includes("connection reset by peer") ||
     msg.includes("socket hang up") ||
+    msg.includes("could not resolve proxy") ||   // proxy hostname resolution failure
+    msg.includes("curl exited with code 5") ||   // proxy resolution failure
     msg.includes("curl exited with code 35") ||  // TLS handshake failure
     msg.includes("curl exited with code 56")     // network receive error
+  );
+}
+
+/**
+ * Detect if a network error occurred BEFORE the request could have been
+ * processed by the server. Only these errors are safe to retry with the
+ * same one-time refresh token — retrying after a mid-connection failure
+ * risks permanent RT loss (refresh_token_reused).
+ */
+export function isSafeToRetryRefresh(error: unknown): boolean {
+  const msg = (error instanceof Error ? error.message : String(error)).toLowerCase();
+  return (
+    msg.includes("econnrefused") ||              // server not reachable
+    msg.includes("could not resolve proxy") ||   // DNS failure
+    msg.includes("could not resolve host") ||    // DNS failure
+    msg.includes("curl exited with code 5") ||   // proxy resolution failure
+    msg.includes("curl exited with code 6") ||   // DNS failure
+    msg.includes("curl exited with code 7") ||   // connection refused
+    msg.includes("curl exited with code 35")     // TLS handshake (before HTTP)
   );
 }
 

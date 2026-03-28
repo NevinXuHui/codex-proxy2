@@ -8,13 +8,243 @@
 
 ### Added
 
+- 加强伪装：Rust native transport（reqwest + rustls），TLS 指纹精确匹配真实 Codex Desktop；补齐 `x-openai-internal-codex-residency`、`x-client-request-id`、`x-codex-turn-state` 请求头
+- 账号探活：`POST /auth/accounts/health-check` 批量健康检查 + `POST /auth/accounts/:id/refresh` 单账号刷新，通过 OAuth refresh 探测存活状态，带 stagger 延迟和并发控制
+- Session affinity：同一对话链路由到同一账号，修复 `previous_response_id` 跨账号失效问题
+- `prompt_cache_key`：每个对话链生成唯一 UUID 传递给后端，启用 prompt cache
+- WebSocket 请求新增 `include: ["reasoning.encrypted_content"]`（reasoning 开启时自动设置）
+- 请求级监控日志：affinity hit/miss、payload 大小、usage 统计、大 payload 告警
+- E2E 测试：proxy-routes（36 cases）、dashboard-auth（9）、batch-label（11）、admin-general（11）、debug-routes（5）—— 覆盖率从 51% 提升至 ~75%
+- 单元测试：config-loader（16 cases）、config-schema（10）、codex-models（9）
+- account-import service 测试补充 RT rotation/fallback 2 cases
+
+### Fixed
+
+- 修复 `service_tier` 在 WebSocket 和 HTTP 两条路径均被丢弃的 bug — 现在正确转发给后端
+- 修复 `PUT /api/proxies/settings` 被 `PUT /api/proxies/:id` 路由参数 shadow 的 bug（Hono 按注册顺序匹配）
+
+### Changed
+
+- 删除冗余测试文件：`self-update-auto.test.ts`（superset 覆盖）、`account-import-refresh.test.ts`（迁移到 service 层）
+- 重命名 `model-plan-routing.test.ts` → `plan-routing-integration.test.ts` 以区分作用域
+- libcurl FFI 连接复用：macOS/Linux 自动构建 dylib，通过 CURLSH 共享连接缓存 + SSL session，消除每次请求的 TCP/TLS 握手开销（~2.9s → ~100-300ms）
+- setup 脚本自动下载静态库、编译 C wrapper、生成 dylib + cacert.pem
+- 自动更新（热更新）功能，默认开启，用户可在 Dashboard 设置中关闭
+  - Git 模式：检测到更新后自动 pull → install → build → 重启
+  - Electron (Win/Linux)：自动下载更新，退出时安装；dock/任务栏显示下载进度条
+  - Electron (macOS)：自动打开 release 页面（平台限制无法自动安装）
+  - 配置项 `update.auto_update`，持久化到 `data/local.yaml`
+
+### Removed
+
+- 删除废弃的 `packages/electron/desktop/` UI（Electron 已直接加载 web/ UI），消除 18 个重复组件
+- 删除 `public-desktop/` 构建产物目录及 `/desktop` 路由
+- 删除 `web/src/` 中 6 个未被引用的死文件（hooks/utils/i18n/theme，~443 LOC）
+
+### Changed
+
+- 提取 `src/proxy/error-classification.ts`：`isBanError`/`isTokenInvalidError`/`isModelNotSupportedError`/`extractRetryAfterSec` 从 proxy-handler 和 usage-refresher 中去重，19 个新测试
+- `scripts/` 按用途分类到 `infra/`、`build/`、`poc/`、`manual-test/` 子目录
+- 新增 `src/context.ts`（AppContext 容器），fingerprint/manager、codex-api、codex-usage、codex-models 支持可选 DI 参数（fallback 到全局单例）
+- `ModelStore` 从模块级单例重构为 class，自由函数 wrapper 保持后向兼容，新增 `getModelStore()` / `setModelStoreForTesting()`
+- Transport 加入 AppContext，codex-api/codex-usage/codex-models/proxy-pool/curl-fetch 支持可选 transport 注入
+- CookieJar critical cookie 写入从 `writeFileSync`（阻塞 10-50ms）改为 `writeFile`（async 非阻塞）
+- `proxy-handler.ts`（353 LOC）拆分为 3 个独立可测试模块：`account-acquisition.ts`（acquire/release + 幂等 guard）、`proxy-error-handler.ts`（4 种错误分类 + 池状态变更）、`response-processor.ts`（流式/非流式响应），26 个新测试
+- `AccountPool`（673 LOC）拆分为 `AccountRegistry`（状态 + CRUD + 查询，423 LOC）+ `AccountLifecycle`（锁 + 轮换，154 LOC），facade 219 LOC 编排。37 个 importer 零改动
+- `model-fetcher.ts` 和 `usage-refresher.ts` 从模块级单例重构为 `ModelFetcher` / `UsageRefresher` class，自由函数 wrapper 保持后向兼容
+- Dashboard 改为 4-tab 布局（概览/管理账号/代理分配/设置），设置面板从首页移至独立 tab，首页保留账号卡片 + 代理池
+- AccountCard 响应式修复：窄屏时操作按钮自动换行不再溢出
+
+### Fixed
+
+- 导入/导出按钮图标反了——导入改为下箭头、导出改为上箭头（#191）
+- Windows 桌面端按钮溢出——Electron 最小宽度从 680px 提高到 800px，覆盖 Tailwind md: 断点（#192）
+- `local.yaml` 的 `server.host` 覆盖已有测试验证，Electron 模式下正确生效（#190）
+
+### Changed
+
+- 版本号从 1.0.x 跳到 2.0.0，CI bump workflow 改为从 package.json 读取 major.minor 系列
+
+- **Phase 3 — Service 层提取**：`src/routes/accounts.ts` 从 518 行降至 172 行（-67%），业务逻辑拆分到 `src/services/account-import.ts`、`account-query.ts`、`account-mutation.ts` 三个 service 类，全部通过 constructor DI，29 个新测试零 `vi.mock()`
+- **Phase 2 — Config DI**：`src/config.ts` 新增 `setConfigForTesting()`/`resetConfigForTesting()`，AccountPool constructor 支持 `rotationStrategy`/`initialToken`/`rateLimitBackoffSeconds` 注入，translation 函数支持 `modelConfig` 可选参数。测试中 `vi.mock("config.js")` 从 9 处降至 2 处
+- AccountList 头部重做：标题行 + 导航标签 + 操作工具栏三层分离，按钮带文字标签，分页信息更清晰（`10 / 908` + 展开全部）
+- 暗色主题修复：图表 SVG 线条颜色改用 CSS 变量（dark mode 下更亮）、代码块 light mode 背景修正、Toggle 开关 thumb 对比度提升
+
+### Added
+
+- 账号标签（label）：支持为每个账号设置自定义标签（如 "Team Alpha"、"个人"），解决同一邮箱加入多个 team 无法区分的问题。AccountCard 有标签时显示标签为主标题，hover 显示编辑按钮
+- Refresh-token-only 导入：批量导入现在支持只传 `refreshToken`（无需有效 JWT），后端自动用 RT 换取 AT 后添加账号
+- 导入模板下载：AccountImportExport 工具栏新增模板下载按钮，包含 token-only、RT-only、label 等示例格式
+- 导入支持 label 字段：批量导入时可为每条记录指定 label
+- Claude Code Setup 卡片：Dashboard 按 Opus/Sonnet/Haiku/自定义 层级一键复制环境变量（推荐模型 gpt-5.4 / gpt-5.4-mini / gpt-5.3-codex）
+- 账号启用/禁用 toggle：AccountCard 和 AccountTable 新增 per-account 开关，无需批量操作即可快速切换账号状态
+- Codex CLI 配置说明：README 新增 `~/.codex/config.toml` 配置示例
+- Token 刷新并发控制（`auth.refresh_concurrency`，默认 2）：多账号同时到期时限制并发数，避免上游限流
+- Dashboard 基础设置新增「刷新并发数」配置项
+- README 添加局域网访问说明（`0.0.0.0` 配置 + Electron 路径）
+
+### Fixed
+
+- Electron 模式下 `data/local.yaml` 中的 `server.host` 配置不生效——Electron 硬编码 `127.0.0.1` 覆盖了用户配置，现在 `local.yaml` 显式设置的 host 优先于启动参数（#175）
+- Dashboard 清空上游代理后 reload 被环境变量 `HTTPS_PROXY` 覆盖回来——`local.yaml` 显式设置的 `proxy_url` 现在优先于环境变量
+- Release 资产命名统一：`artifactName` 模板强制 `Codex-Proxy-{version}-{os}-{arch}.{ext}`，消除 `Codex.Proxy` vs `Codex-Proxy` 重复，x64 DMG 现在明确标注架构（`mac-x64`）
+- macOS x64 构建前清理旧资产，避免 release 页面出现重复文件
+
+### Changed
+
+- TLS 指纹对齐：curl-impersonate 升级支持 chrome144 profile（v1.5.1），`KNOWN_CHROME_PROFILES` 新增 133/142
+- 默认协议从 HTTP/1.1 改为 HTTP/2，匹配真实 Codex Desktop 行为
+- 指纹版本同步至 v26.318.11754（build 1100）
+- 配额自动刷新默认关闭（`refresh_interval_minutes: 0`），用户在 Dashboard 自行设置
+- 配额刷新改为有限并发（默认 10，可配 `quota.concurrency`），不再全量并发
+- Token 刷新走账号分配的代理，永久错误需连续 2 次才标 expired
+- **⚠️ 密钥变更**：首次启动自动创建 `data/local.yaml` 并设置默认密钥 `pwd`。所有自定义配置请通过 Dashboard 修改（自动保存到 `data/local.yaml`，更新不覆盖）
+- `suppress_desktop_directives` 默认值改为 `false`
+
+### Added
+
+- Dashboard「基础设置」面板：端口、代理、HTTP/1.1、默认模型、推理等级、注入/压制、Token 刷新开关
+- Dashboard「配额设置」面板：新增并发数配置
+- 代理池 YAML 导入导出（`/api/proxies/export`、`/api/proxies/import`）
+- 账号列表分页（默认显示 10 个，可展开）
+- Token 自动刷新开关（`auth.refresh_enabled`）
+- HTTP/2 自动降级：curl 因 H2 错误失败时自动切换 HTTP/1.1（TTL 10 分钟后重试 H2）
+  - exit code 16（H2 专属）无条件触发；其他 exit code 需 stderr 含 H2 关键词
+  - `force_http11` 配置仍可手动强制 HTTP/1.1
+
+### Fixed
+
+- 配置 overlay 机制：Dashboard 设置写入 `data/local.yaml`（gitignored），不再修改 `config/default.yaml`
+  - `git pull` 不会覆盖用户自定义设置（proxy_api_key、rotation_strategy、quota 等）
+  - `config/default.yaml` 的 `proxy_api_key` 默认值改为 `null`（自动生成）
+
+### Fixed
+
+- 额度恢复后账号仍显示"已限速"（#162）
+  - usage-refresher 发现 `limit_reached: false` 时主动调用 `clearRateLimit()` 恢复 active 并清除 `rate_limit_until`
+- Anthropic `/v1/messages` 截图场景 400 报错：`tool_result.content` 不支持 image block
+  - Schema 放行 image block；翻译层将图片提取为紧随 `function_call_output` 的 user message（`input_image`）
+- 代理自动检测使用 `host.docker.internal` 主机名导致 curl 无法解析（#114）
+  - 探测成功后通过 DNS lookup 解析为 IP 地址，避免 curl subprocess DNS 解析失败
+- OAuth 登录失败后重试报 "Invalid or expired session"（#154）
+  - Session 改为 peek → exchange 成功 → delete 生命周期，exchange 失败时 session 保留可重试
+- `withDirectFallback` 未捕获 curl exit code 5（代理解析失败），不会 fallback 直连
+  - `isProxyNetworkError` 新增 `could not resolve proxy` 和 `curl exited with code 5` 匹配
+- curl error 61：fingerprint 的 `Accept-Encoding: br, zstd` 覆盖了 `--compressed` 自动协商，系统 curl 不支持 br/zstd 时解压失败
+  - curl-cli-transport 统一跳过 `Accept-Encoding` header，由 `--compressed` 按 curl 实际能力协商
+- 系统 curl 不支持 `--compressed` 时启动报错
+  - 启动时探测支持情况，不支持则跳过该 flag 并提示安装 curl-impersonate
+- 模型列表启动时不更新：token 刷新与 model fetch 存在竞态，初始 fetch 跳过后直接等 1 小时
+  - model-fetcher 改为 fast-retry（10s 间隔，最多 12 次），账号就绪后立即拉取
+  - `config/models.yaml` 补回 gpt-5.4/5.4-mini/5.3-codex（3/18 后端已恢复）
+
+### Added
+
+- Dashboard 登录门（#141）：当 `proxy_api_key` 已配置且请求来自非 localhost 时，需输入密码才能访问控制台
+  - Cookie-based session，TTL 由 `session.ttl_minutes` 控制（默认 60 分钟）
+  - `POST /auth/dashboard-login`、`POST /auth/dashboard-logout`、`GET /auth/dashboard-status` 端点
+  - API 路由（`/v1/*`）不受影响，Electron（localhost）自动跳过
+  - 简单防暴力：同 IP 5 次/60s 限制
+  - HTTPS 自动检测：反代 `X-Forwarded-Proto: https` 时 cookie 加 `Secure` flag
+  - 远程 session 禁止清空 `proxy_api_key`（防止误操作导致登录门失效）
+  - Header 显示条件性退出按钮
+- 账号封禁检测：上游返回非 Cloudflare 的 403 时自动标记为 `banned` 状态
+  - Dashboard 卡片/表格显示玫红色 `Banned`/`已封禁` 状态徽章
+  - 状态筛选下拉新增 `Banned` 选项
+  - 被封账号自动跳过（`acquire()` 仅选 active），请求时自动切换到其他账号
+  - 后台额度刷新周期性重试 banned 账号，成功即自动解封
+- 上游 401 token 吊销（"token has been invalidated"）自动标记过期并切换下一个账号
+  - 之前 401 直接透传给客户端，不标记也不重试
+- Usage Stats 页面（`#/usage-stats`）：累计 token 用量汇总 + 时间趋势图
+  - 后台每 5 分钟记录用量快照，保留 7 天历史
+  - `GET /admin/usage-stats/summary` 实时累计汇总
+  - `GET /admin/usage-stats/history?granularity=hourly|daily&hours=N` 时间序列增量
+  - 纯 SVG 折线图（input/output tokens + 请求数），无外部图表库
+  - 支持按小时/按天粒度，24h/3d/7d 时间范围切换
+- Account Management 页面（`#/account-management`）：批量删除、批量改状态（active/disabled）、导入导出
+  - `POST /auth/accounts/batch-delete` 和 `POST /auth/accounts/batch-status` 批量端点
+  - 状态摘要条可点击筛选，复用 AccountTable 选择/分页/Shift 多选
+
+### Fixed
+
+- 运行时缓存（模型目录同步、版本检测结果）直接写入 git 跟踪的 `config/` 文件，导致仓库频繁变脏
+  - `model-store` 的 `syncStaticModels()` 改写 `data/models-cache.yaml`（gitignored）
+  - `update-checker` 的 `applyVersionUpdate()` 改写 `data/version-state.json`（gitignored）
+  - `config/` 目录现在对运行时操作只读，仅 admin API 设置变更例外
+
+- Responses SSE 新事件（`response.output_item.added` with `item.type=message`、`response.content_part.added/done`）未被识别，导致 `[CodexEvents] Unknown event` 日志刷屏
+- 新模型（如 `gpt-5.4-mini`）无法被动态发现的问题
+  - 移除 `isCodexCompatibleId()` 白名单过滤，信任后端 `/codex/models` 返回
+- 同一 Team 的多个账号因共享 `chatgpt_account_id` 只能添加一个的问题（#126）
+  - 去重逻辑改为 `accountId + userId` 组合键，Team 成员各自保留独立条目
+  - `AccountEntry` 新增 `userId` 字段，持久化层自动回填
+- 额度耗尽账号仍显示「活跃」并接收请求的问题（#115）
+  - `markQuotaExhausted()` 现在可以覆盖 `rate_limited` 状态（仅延长，不缩短 reset 时间）
+  - 后台额度刷新现在同时检查 `rate_limited` 账号，防止因 429 短暂 backoff 导致漏检
+- `/v1/responses` 不再强制要求 `instructions` 字段，未传时默认空字符串（#71）
+  - 修复 Cherry 等第三方客户端不传 `instructions` 时返回 400 的兼容性问题
+- CI 构建修复：WebSocket 传输 `instructions` 类型不匹配（TS2322）导致 Electron/Docker 编译失败
+- `shared/i18n/translations.ts` 移除中英文重复 `selectAll` key（Vite 警告）
+- `sync-changelog.yml` 推送步骤加 rebase 重试（解决与 bump-electron 并行推送竞态）
+
+### Changed
+
+- 架构重构：降低模块耦合、改善可测试性
+  - 提取 `codex-types.ts`：API 类型定义与类实现分离，20+ 文件只需类型不需类
+  - 提取 `rotation-strategy.ts`：轮换策略从 AccountPool 解耦为纯函数模块（10 新测试）
+  - 拆分 `web.ts`（605 LOC）→ `routes/admin/`（health/update/connection/settings 4 子路由）
+  - 提取 `account-persistence.ts`：文件系统持久化逻辑从 AccountPool 分离为可注入接口（8 新测试）
+  - 拆分 `codex-api.ts`：SSE 解析（`codex-sse.ts`）、用量查询（`codex-usage.ts`）、模型发现（`codex-models.ts`）独立为纯函数模块（10 新测试）
+  - 所有提取模块通过 re-export 保持现有 import 路径兼容
+
+### Added
+
+- Sticky rotation strategy（#107）：新增 `sticky` 账号轮换策略，持续使用同一账号直到限速或额度耗尽
+  - `src/config.ts`：`rotation_strategy` 枚举新增 `"sticky"` 选项
+  - `selectByStrategy()` 按 `last_used` 降序排列，优先复用最近使用的账号
+  - `GET/POST /admin/rotation-settings` 端点：读取和更新轮换策略（支持 Bearer auth）
+  - Dashboard：RotationSettings 组件（粘滞 vs 轮换两层 radio group）
+  - i18n：中英文翻译（策略名称 + 描述）
+  - 13 个新测试覆盖 sticky 选择逻辑 + 路由端点
+- `POST /admin/refresh-models` 端点：手动触发模型列表刷新，解决 model-fetcher ~1h 缓存过时导致新模型不可用的问题；支持 Bearer auth（当配置 proxy_api_key 时）
+- Plan routing integration tests：通过 proxy handler 完整路径验证 free/team 账号的模型路由（7 cases），覆盖 plan map 更新后请求解除阻塞的场景
+
+### Changed
+
+- Electron 桌面端从独立分支迁移为 npm workspace（`packages/electron/`），消除 master→electron 分支同步冲突；删除 `sync-electron.yml`，release.yml 改为 workspace 感知构建
+- `scripts/setup-curl.ts`：加入 GITHUB_TOKEN 认证避免 CI rate limit；Windows DLL 名适配 v1.5+（`libcurl-impersonate.dll`）；tar 解压 bsdtar/GNU tar 自动 fallback
+
+### Added
+
+- Dashboard 额度设置面板：可在 Web UI 直接调整额度刷新间隔、主/次预警阈值、自动跳过耗尽账号开关，无需手动编辑 YAML；API `GET/POST /admin/quota-settings` 支持鉴权 (#92)
+
+### Fixed
+
+- 删除账号后额度预警横幅未清除：`DELETE /auth/accounts/:id` 漏调 `clearWarnings()`，导致已删除账号的 quota warning 残留在前端 (#100)
+- macOS Electron 桌面版登录报 `spawn Unknown system error -86`：CI 在 arm64 runner 上同时构建 arm64/x64 DMG，但只下载 arm64 的 curl-impersonate，导致 Intel Mac 用户 spawn 失败（EBADARCH）；拆分为 per-arch 构建 + `setup-curl.ts` 支持 `--arch` 交叉下载；错误提示改为明确的架构不匹配诊断 (#96)
+- 默认关闭 desktop context 注入：之前每次请求注入 ~1500 token 的 Codex Desktop 系统提示，导致 prompt_tokens 虚高；新增 `model.inject_desktop_context` 配置项（默认 `false`），需要时可手动开启 (#95)
+
+### Added
+
+- 额度自动刷新 + 分层预警：后台每 5 分钟（可配置）定时拉取所有账号的官方额度，缓存到 AccountEntry 供 Dashboard 即时读取；额度达到阈值（默认 80%/90%，可自定义）时显示 warning/critical 横幅；额度耗尽的账号自动标记为 rate_limited 跳过分配，到期自动恢复 (#92)
+- Docker 镜像自动发布：push master 自动构建多架构（amd64/arm64）镜像到 GHCR（`ghcr.io/icebear0828/codex-proxy`），docker-compose.yml 切换为预构建镜像，支持 Watchtower 自动更新
 - 双窗口配额显示：Dashboard 账号卡片同时展示主窗口（小时限制）和次窗口（周限制）的用量百分比、进度条和重置时间，后端 `secondary_window` 不再被忽略
 - 更新弹窗 + 自动重启：点击"有可用更新"弹出 Modal 显示 changelog，一键更新后服务器自动重启、前端自动刷新，零人工干预（git 模式 spawn 新进程、Docker/Electron 显示对应操作指引）
 - Model-aware 多计划账号路由：不同 plan（free/plus/business）的账号自动路由到各自支持的模型，business 账号可继续使用 gpt-5.4 等高端模型 (#57)
 - Structured Outputs 支持：`/v1/chat/completions` 支持 `response_format`（`json_object` / `json_schema`），Gemini 端点支持 `responseMimeType` + `responseSchema`，自动翻译为 Codex Responses API 的 `text.format`；`/v1/responses` 直通 `text` 字段
 
+- 模型列表自动同步：后端动态 fetch 成功后自动回写 `config/models.yaml`，静态配置不再滞后；前端每 60s 轮询模型列表，新模型无需刷新页面即可选择
+- Tuple Schema 支持：`prefixItems`（JSON Schema 2020-12 tuple）自动转换为等价 object schema 发给上游，响应侧还原为数组；OpenAI / Gemini / Responses 三端点统一支持
+- WebSocket 传输 + `previous_response_id` 多轮支持：`/v1/responses` 端点自动通过 WebSocket 连接上游，服务端持久化 response，客户端可通过 `previous_response_id` 引用前轮对话实现增量多轮；WebSocket 失败自动降级回 HTTP SSE (#83)
+- 账号批量导入导出：Dashboard 支持导出全部账号到 JSON 文件（含 token，用于备份/迁移），支持从 JSON 文件批量导入账号，自动去重 (#82)
+
+### Fixed
+
+- 前端缓存问题：`index.html` 设置 `Cache-Control: no-cache` 防止浏览器缓存旧页面，`/assets/*` 设置 immutable 长缓存（Vite content hash）
+
 ### Changed
 
+- Light mode 背景色从 `#f6f8f6` 改为纯白 `#ffffff`，增大亮/暗主题视觉差异
 - 提取管道强化：`extract-fingerprint.ts` 新增 fallback 扫描（`.vite/build/*.js` 全文件回退）和 webview 模型发现（`webview/assets/*.js`），pattern 失败不再中断整个流程
 - 模型/别名自动添加降级为 semi-auto：后端已通过 `isCodexCompatibleId()` 自动合并新模型，`apply-update.ts` 不再自动写入 `models.yaml`（避免 `mutateYaml` 破坏 YAML 格式）
 - Codex Desktop 版本更新至 v26.309.31024 (build 962)

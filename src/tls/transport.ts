@@ -8,6 +8,7 @@
 import { existsSync } from "fs";
 import { resolve } from "path";
 import { getBinDir } from "../paths.js";
+import { isNativeAvailable } from "./native-transport.js";
 
 export interface TlsTransportResponse {
   status: number;
@@ -17,6 +18,8 @@ export interface TlsTransportResponse {
 }
 
 export interface TlsTransport {
+  /** Clean up transport resources (connection pools, shared handles). */
+  destroy?(): void;
   /**
    * Streaming POST (for SSE). Returns headers + streaming body.
    * @param proxyUrl  undefined = global default, null = direct (no proxy), string = specific proxy
@@ -41,6 +44,14 @@ export interface TlsTransport {
     proxyUrl?: string | null,
   ): Promise<{ status: number; body: string }>;
 
+  /** GET with Set-Cookie header capture. Used by warmup for session cookie establishment. */
+  getWithCookies?(
+    url: string,
+    headers: Record<string, string>,
+    timeoutSec?: number,
+    proxyUrl?: string | null,
+  ): Promise<{ status: number; body: string; setCookieHeaders: string[] }>;
+
   /**
    * Simple (non-streaming) POST — returns full body as string.
    * @param proxyUrl  undefined = global default, null = direct (no proxy), string = specific proxy
@@ -58,7 +69,7 @@ export interface TlsTransport {
 }
 
 let _transport: TlsTransport | null = null;
-let _transportType: "libcurl-ffi" | "curl-cli" | "none" = "none";
+let _transportType: "native" | "libcurl-ffi" | "curl-cli" | "none" = "none";
 let _ffiError: string | null = null;
 
 /**
@@ -71,6 +82,23 @@ export async function initTransport(): Promise<TlsTransport> {
   const { getConfig } = await import("../config.js");
   const config = getConfig();
   const setting = config.tls.transport ?? "auto";
+
+  // Native transport (Rust reqwest + rustls) — preferred for matching Codex Desktop TLS
+  if (setting === "native" || (setting === "auto" && isNativeAvailable())) {
+    try {
+      const { createNativeTransport } = await import("./native-transport.js");
+      _transport = await createNativeTransport();
+      _transportType = "native";
+      console.log("[TLS] Using native (rustls) transport");
+      return _transport;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (setting === "native") {
+        throw new Error(`Failed to initialize native transport: ${msg}`);
+      }
+      console.warn(`[TLS] Native transport unavailable (${msg}), trying FFI fallback`);
+    }
+  }
 
   if (setting === "libcurl-ffi" || (setting === "auto" && shouldUseFfi())) {
     try {
@@ -106,19 +134,27 @@ export function getTransport(): TlsTransport {
 
 /**
  * Determine if FFI transport should be used in "auto" mode.
- * FFI is preferred on Windows where curl-impersonate CLI is unavailable.
+ * FFI is preferred for connection pooling (TCP + TLS session reuse).
+ * Enabled on Windows (no CLI available) and macOS/Linux (when dylib/so present).
  */
 function shouldUseFfi(): boolean {
-  if (process.platform !== "win32") return false;
+  const binDir = getBinDir();
 
-  // Check if libcurl-impersonate DLL exists (shipped as libcurl.dll)
-  const dllPath = resolve(getBinDir(), "libcurl.dll");
-  return existsSync(dllPath);
+  if (process.platform === "win32") {
+    return existsSync(resolve(binDir, "libcurl.dll"));
+  }
+  if (process.platform === "darwin") {
+    return existsSync(resolve(binDir, "libcurl-impersonate.dylib"));
+  }
+  if (process.platform === "linux") {
+    return existsSync(resolve(binDir, "libcurl-impersonate.so"));
+  }
+  return false;
 }
 
 /** Get transport diagnostic info. */
 export function getTransportInfo(): {
-  type: "libcurl-ffi" | "curl-cli" | "none";
+  type: "native" | "libcurl-ffi" | "curl-cli" | "none";
   initialized: boolean;
   impersonate: boolean;
   ffi_error: string | null;

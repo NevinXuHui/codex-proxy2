@@ -1,6 +1,7 @@
 import { Hono } from "hono";
 import { serve } from "@hono/node-server";
-import { loadConfig, loadFingerprint, getConfig } from "./config.js";
+import { loadConfig, loadFingerprint, getConfig, hasLocalOverride } from "./config.js";
+import { initContext } from "./context.js";
 import { AccountPool } from "./auth/account-pool.js";
 import { RefreshScheduler } from "./auth/refresh-scheduler.js";
 import { importTokens } from "./auth/token-importer.js";
@@ -8,6 +9,7 @@ import { importTokens } from "./auth/token-importer.js";
 import { requestId } from "./middleware/request-id.js";
 import { logger } from "./middleware/logger.js";
 import { errorHandler } from "./middleware/error-handler.js";
+import { dashboardAuth } from "./middleware/dashboard-auth.js";
 import { createAuthRoutes } from "./routes/auth.js";
 import { createAccountRoutes } from "./routes/accounts.js";
 import { createChatRoutes } from "./routes/chat.js";
@@ -20,11 +22,15 @@ import { ProxyPool } from "./proxy/proxy-pool.js";
 import { createProxyRoutes } from "./routes/proxies.js";
 import { createResponsesRoutes } from "./routes/responses.js";
 import { startUpdateChecker, stopUpdateChecker } from "./update-checker.js";
-import { startProxyUpdateChecker, stopProxyUpdateChecker, setCloseHandler } from "./self-update.js";
+import { startProxyUpdateChecker, stopProxyUpdateChecker, setCloseHandler, getDeployMode } from "./self-update.js";
 import { initProxy } from "./tls/curl-binary.js";
-import { initTransport } from "./tls/transport.js";
+import { initTransport, getTransport } from "./tls/transport.js";
 import { loadStaticModels } from "./models/model-store.js";
 import { startModelRefresh, stopModelRefresh } from "./models/model-fetcher.js";
+import { startQuotaRefresh, stopQuotaRefresh } from "./auth/usage-refresher.js";
+import { UsageStatsStore } from "./auth/usage-stats.js";
+import { startSessionCleanup, stopSessionCleanup } from "./auth/dashboard-session.js";
+import { createDashboardAuthRoutes } from "./routes/dashboard-login.js";
 
 export interface ServerHandle {
   close: () => Promise<void>;
@@ -44,7 +50,7 @@ export async function startServer(options?: StartOptions): Promise<ServerHandle>
   // Load configuration
   console.log("[Init] Loading configuration...");
   const config = loadConfig();
-  loadFingerprint();
+  const fingerprint = loadFingerprint();
 
   // Load static model catalog (before transport/auth init)
   loadStaticModels();
@@ -53,13 +59,15 @@ export async function startServer(options?: StartOptions): Promise<ServerHandle>
   await initProxy();
 
   // Initialize TLS transport (auto-selects curl CLI or libcurl FFI)
-  await initTransport();
+  const transport = await initTransport();
+  initContext(config, fingerprint, transport);
 
   // Initialize managers
   const accountPool = new AccountPool();
   const refreshScheduler = new RefreshScheduler(accountPool);
   const cookieJar = new CookieJar();
   const proxyPool = new ProxyPool();
+  refreshScheduler.setProxyPool(proxyPool);
 
   // Auto-import tokens from token directory
   importTokens(accountPool, refreshScheduler);
@@ -71,6 +79,7 @@ export async function startServer(options?: StartOptions): Promise<ServerHandle>
   app.use("*", requestId);
   app.use("*", logger);
   app.use("*", errorHandler);
+  app.use("*", dashboardAuth);
 
   // Mount routes
   const authRoutes = createAuthRoutes(accountPool, refreshScheduler);
@@ -80,8 +89,11 @@ export async function startServer(options?: StartOptions): Promise<ServerHandle>
   const geminiRoutes = createGeminiRoutes(accountPool, cookieJar, proxyPool);
   const responsesRoutes = createResponsesRoutes(accountPool, cookieJar, proxyPool);
   const proxyRoutes = createProxyRoutes(proxyPool, accountPool);
-  const webRoutes = createWebRoutes(accountPool);
+  const usageStats = new UsageStatsStore();
+  usageStats.recoverBaseline(accountPool);
+  const webRoutes = createWebRoutes(accountPool, usageStats);
 
+  app.route("/", createDashboardAuthRoutes());
   app.route("/", authRoutes);
   app.route("/", accountRoutes);
   app.route("/", chatRoutes);
@@ -93,8 +105,11 @@ export async function startServer(options?: StartOptions): Promise<ServerHandle>
   app.route("/", webRoutes);
 
   // Start server
+  // User's explicit local.yaml host wins over programmatic options (e.g. Electron's 127.0.0.1 default)
   const port = options?.port ?? config.server.port;
-  const host = options?.host ?? config.server.host;
+  const host = hasLocalOverride("server", "host")
+    ? config.server.host
+    : (options?.host ?? config.server.host);
 
   const poolSummary = accountPool.getPoolSummary();
   const displayHost = (host === "0.0.0.0" || host === "::") ? "localhost" : host;
@@ -120,12 +135,21 @@ export async function startServer(options?: StartOptions): Promise<ServerHandle>
   }
   console.log();
 
-  // Start background update checker
+  // Start dashboard session cleanup
+  startSessionCleanup();
+
+  // Start background update checkers
+  // (Electron has its own native auto-updater — skip proxy update checker)
   startUpdateChecker();
-  startProxyUpdateChecker();
+  if (getDeployMode() !== "electron") {
+    startProxyUpdateChecker();
+  }
 
   // Start background model refresh (requires auth to be ready)
   startModelRefresh(accountPool, cookieJar, proxyPool);
+
+  // Start usage stats snapshot timer (no upstream requests — quota is collected passively)
+  startQuotaRefresh(accountPool, usageStats);
 
   // Start proxy health check timer (if proxies exist)
   proxyPool.startHealthCheckTimer();
@@ -146,6 +170,8 @@ export async function startServer(options?: StartOptions): Promise<ServerHandle>
         stopUpdateChecker();
         stopProxyUpdateChecker();
         stopModelRefresh();
+        stopQuotaRefresh();
+        stopSessionCleanup();
         refreshScheduler.destroy();
         proxyPool.destroy();
         cookieJar.destroy();
@@ -201,6 +227,7 @@ async function main() {
     if (forceExit.unref) forceExit.unref();
 
     handle.close().then(() => {
+      getTransport().destroy?.();
       console.log("[Shutdown] Server closed, cleanup complete.");
       clearTimeout(forceExit);
       process.exit(0);

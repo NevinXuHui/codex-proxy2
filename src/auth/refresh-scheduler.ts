@@ -15,52 +15,88 @@ import { decodeJwtPayload } from "./jwt-utils.js";
 import { refreshAccessToken } from "./oauth-pkce.js";
 import { jitter, jitterInt } from "../utils/jitter.js";
 import type { AccountPool } from "./account-pool.js";
+import type { ProxyPool } from "../proxy/proxy-pool.js";
 
 /** Errors that indicate the refresh token itself is invalid (permanent failure). */
-const PERMANENT_ERRORS = ["invalid_grant", "invalid_token", "access_denied"];
-
-/** HTTP status codes that indicate permanent refresh failure. */
-const PERMANENT_STATUS_CODES = [302, 401, 403];
+const PERMANENT_ERRORS = ["invalid_grant", "invalid_token", "access_denied", "refresh_token_expired", "refresh_token_reused", "account has been deactivated"];
 
 const MAX_ATTEMPTS = 5;
 const BASE_DELAY_MS = 5_000;
 const RECOVERY_DELAY_MS = 10 * 60 * 1000; // 10 minutes
+/** Require this many consecutive permanent errors before marking expired. */
+const PERMANENT_THRESHOLD = 2;
 
 export class RefreshScheduler {
   private timers: Map<string, ReturnType<typeof setTimeout>> = new Map();
   private pool: AccountPool;
+  private proxyPool: ProxyPool | null = null;
+
+  /** Semaphore: number of refresh requests currently in flight. */
+  private _running = 0;
+  /** Queue of pending refresh callbacks waiting for a slot. */
+  private _queue: Array<() => void> = [];
+  /** Accounts currently being refreshed (prevents concurrent refresh of same account). */
+  private _inFlight: Set<string> = new Set();
 
   constructor(pool: AccountPool) {
     this.pool = pool;
     this.scheduleAll();
   }
 
+  /** Set proxy pool for per-account proxy routing during refresh. */
+  setProxyPool(proxyPool: ProxyPool): void {
+    this.proxyPool = proxyPool;
+  }
+
   /** Schedule refresh for all accounts in the pool. */
   scheduleAll(): void {
+    const config = getConfig();
+    if (!config.auth.refresh_enabled) {
+      console.log("[RefreshScheduler] Auto-refresh disabled (refresh_enabled = false)");
+      return;
+    }
+
+    let expiredIndex = 0;
     for (const entry of this.pool.getAllEntries()) {
-      if (entry.status === "active") {
-        this.scheduleOne(entry.id, entry.token);
-      } else if (entry.status === "refreshing") {
+      // Skip accounts without refresh token — can't auto-refresh
+      if (!entry.refreshToken) continue;
+      // Skip permanently disabled/banned accounts
+      if (entry.status === "disabled" || entry.status === "banned") continue;
+
+      if (entry.status === "refreshing") {
         // Crash recovery: was mid-refresh when process died
         console.log(`[RefreshScheduler] Account ${entry.id}: recovering from 'refreshing' state`);
         this.doRefresh(entry.id);
-      } else if (entry.status === "expired" && entry.refreshToken) {
-        // Attempt recovery for expired accounts that still have a refresh token
-        const delay = jitterInt(30_000, 0.3);
-        console.log(`[RefreshScheduler] Account ${entry.id}: expired with refresh_token, recovery attempt in ${Math.round(delay / 1000)}s`);
+      } else if (entry.status === "expired") {
+        // Recovery attempt — stagger by 2s per account to avoid burst
+        const delay = 30_000 + expiredIndex * 2_000;
+        expiredIndex++;
+        console.log(`[RefreshScheduler] Account ${entry.id}: expired, recovery attempt in ${Math.round(delay / 1000)}s`);
         const timer = setTimeout(() => {
           this.timers.delete(entry.id);
           this.doRefresh(entry.id);
         }, delay);
         if (timer.unref) timer.unref();
         this.timers.set(entry.id, timer);
-      } else if (entry.status === "expired" && !entry.refreshToken) {
-        const email = entry.email ?? entry.id;
-        console.warn(`[RefreshScheduler] Account ${email}: expired with no refresh_token`);
-        console.log(`[RefreshScheduler] Auto-removing expired account ${email} (no refresh token available)`);
-        this.pool.removeAccount(entry.id);
+      } else {
+        // active / rate_limited — schedule refresh at token expiry
+        this.scheduleOne(entry.id, entry.token);
       }
     }
+  }
+
+  /**
+   * Trigger an immediate token refresh for an account whose token was
+   * invalidated server-side (401) before JWT expiry.
+   * No-op if the account has no refresh token.
+   */
+  triggerRefreshNow(entryId: string): void {
+    const entry = this.pool.getEntry(entryId);
+    if (!entry?.refreshToken) return;
+    if (entry.status === "disabled" || entry.status === "banned") return;
+    if (this._inFlight.has(entryId)) return; // already refreshing
+    this.clearOne(entryId);
+    this.doRefresh(entryId);
   }
 
   /** Schedule refresh for a single account. */
@@ -106,71 +142,106 @@ export class RefreshScheduler {
     }
   }
 
-  /** Cancel all timers. */
+  /** Cancel all timers and drain the semaphore queue. */
   destroy(): void {
     for (const timer of this.timers.values()) {
       clearTimeout(timer);
     }
     this.timers.clear();
+    // Unblock any waiters so their promises resolve (doRefresh will
+    // bail out via getEntry returning null or scheduler being dead).
+    for (const resolve of this._queue) resolve();
+    this._queue.length = 0;
+    this._running = 0;
+    this._inFlight.clear();
   }
 
   // ── Internal ────────────────────────────────────────────────────
 
+  /** Acquire a semaphore slot, waiting if at capacity. */
+  private async acquireSlot(): Promise<void> {
+    const limit = getConfig().auth.refresh_concurrency;
+    if (this._running < limit) {
+      this._running++;
+      return;
+    }
+    await new Promise<void>((resolve) => this._queue.push(resolve));
+    this._running++;
+  }
+
+  /** Release a semaphore slot, unblocking the next waiter. */
+  private releaseSlot(): void {
+    this._running--;
+    const next = this._queue.shift();
+    if (next) next();
+  }
+
   private async doRefresh(entryId: string): Promise<void> {
+    if (this._inFlight.has(entryId)) return; // prevent concurrent refresh of same account
+    this._inFlight.add(entryId);
+    await this.acquireSlot();
+    try {
+      await this._doRefreshInner(entryId);
+    } catch (err) {
+      // Unexpected error (e.g. JSON parse failure) — recover from "refreshing" state
+      const entry = this.pool.getEntry(entryId);
+      if (entry?.status === "refreshing") {
+        console.error(`[RefreshScheduler] Unexpected error for ${entryId}: ${err instanceof Error ? err.message : err}`);
+        this.pool.markStatus(entryId, "active");
+        this.scheduleRecovery(entryId);
+      }
+    } finally {
+      this._inFlight.delete(entryId);
+      this.releaseSlot();
+    }
+  }
+
+  private async _doRefreshInner(entryId: string): Promise<void> {
     const entry = this.pool.getEntry(entryId);
     if (!entry) return;
 
     if (!entry.refreshToken) {
-      const email = entry.email ?? entryId;
       console.warn(
-        `[RefreshScheduler] Account ${email} has no refresh_token, cannot auto-refresh`,
+        `[RefreshScheduler] Account ${entryId} has no refresh_token, cannot auto-refresh. Re-login required at /`,
       );
-      console.log(`[RefreshScheduler] Auto-removing expired account ${email} (no refresh token available)`);
-      this.pool.removeAccount(entryId);
+      this.pool.markStatus(entryId, "expired");
       return;
     }
 
     console.log(`[RefreshScheduler] Refreshing account ${entryId} (${entry.email ?? "?"})`);
     this.pool.markStatus(entryId, "refreshing");
 
+    const accountProxyUrl = this.proxyPool?.resolveProxyUrl(entryId, true);
+    let permanentHits = 0;
+
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
       try {
-        const tokens = await refreshAccessToken(entry.refreshToken);
-        // Update token and refresh_token (if a new one was issued)
-        this.pool.updateToken(
-          entryId,
-          tokens.access_token,
-          tokens.refresh_token,
-        );
-        console.log(`[RefreshScheduler] Account ${entryId} refreshed successfully`);
+        const isOneTimeRT = entry.refreshToken.startsWith("oaistb_rt_");
+        const tokens = await refreshAccessToken(entry.refreshToken, accountProxyUrl);
+
+        // updateToken guards against clearing RT — safe to pass tokens.refresh_token directly.
+        // If the server returned no new RT, the existing one is preserved.
+        if (!tokens.refresh_token) {
+          console.warn(`[RefreshScheduler] Account ${entryId}: server returned no new RT, keeping existing`);
+        }
+        this.pool.updateToken(entryId, tokens.access_token, tokens.refresh_token ?? undefined);
+        const rtType = isOneTimeRT ? " (oaistb_rt_ → rotated)" : "";
+        console.log(`[RefreshScheduler] Account ${entryId} refreshed successfully${rtType}`);
         this.scheduleOne(entryId, tokens.access_token);
         return;
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
 
-        // Check for permanent failures by error message
-        if (PERMANENT_ERRORS.some((e) => msg.toLowerCase().includes(e))) {
-          const entry = this.pool.getEntry(entryId);
-          const email = entry?.email ?? entryId;
-          console.error(`[RefreshScheduler] Permanent failure for ${email}: ${msg}`);
-          console.log(`[RefreshScheduler] Auto-removing account ${email} due to permanent refresh failure`);
-          this.pool.removeAccount(entryId);
-          return;
-        }
-
-        // Check for permanent failures by HTTP status code (302, 401, 403)
-        // Error format: "Token refresh failed (302): ..."
-        const statusMatch = msg.match(/Token refresh failed \((\d+)\)/);
-        if (statusMatch) {
-          const statusCode = parseInt(statusMatch[1], 10);
-          if (PERMANENT_STATUS_CODES.includes(statusCode)) {
-            const entry = this.pool.getEntry(entryId);
-            const email = entry?.email ?? entryId;
-            console.error(`[RefreshScheduler] Permanent failure (HTTP ${statusCode}) for ${email}: ${msg}`);
-            console.log(`[RefreshScheduler] Auto-removing account ${email} due to refresh failure`);
-            this.pool.removeAccount(entryId);
+        // Track consecutive permanent errors — only mark expired after threshold
+        const isPermanent = PERMANENT_ERRORS.some((e) => msg.toLowerCase().includes(e));
+        if (isPermanent) {
+          permanentHits++;
+          if (permanentHits >= PERMANENT_THRESHOLD) {
+            console.error(`[RefreshScheduler] Permanent failure (${permanentHits}x) for ${entryId}: ${msg}`);
+            this.pool.markStatus(entryId, "expired");
             return;
           }
+          console.warn(`[RefreshScheduler] Permanent error (${permanentHits}/${PERMANENT_THRESHOLD}) for ${entryId}: ${msg}, retrying...`);
         }
 
         if (attempt < MAX_ATTEMPTS) {

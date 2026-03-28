@@ -10,7 +10,8 @@ import { resolve } from "path";
 import { homedir } from "os";
 import { getConfig } from "../config.js";
 import { curlFetchPost, type CurlFetchResponse } from "../tls/curl-fetch.js";
-import { withDirectFallback, isCloudflareChallengeResponse } from "../tls/direct-fallback.js";
+import { withDirectFallback, isCloudflareChallengeResponse, isProxyNetworkError, isSafeToRetryRefresh } from "../tls/direct-fallback.js";
+import { getProxyUrl } from "../tls/curl-binary.js";
 
 export interface PKCEChallenge {
   codeVerifier: string;
@@ -161,11 +162,27 @@ export async function exchangeCode(
 
 /**
  * Refresh an access token using a refresh_token.
+ *
+ * Fallback chain: accountProxy → globalProxy → direct.
+ * Each step is skipped if it duplicates the previous one.
  */
 export async function refreshAccessToken(
   refreshToken: string,
+  accountProxyUrl?: string | null,
 ): Promise<TokenResponse> {
   const config = getConfig();
+  const globalProxyUrl = getProxyUrl();
+
+  // Build deduplicated fallback chain: account proxy → global proxy → direct
+  const chain: Array<string | null | undefined> = [accountProxyUrl];
+  // Add global proxy if it differs from account proxy
+  if (globalProxyUrl !== null && globalProxyUrl !== accountProxyUrl) {
+    chain.push(undefined); // undefined = use global default
+  }
+  // Add direct (null) as last resort, skip if already the last step
+  if ((accountProxyUrl != null || globalProxyUrl !== null) && chain[chain.length - 1] !== null) {
+    chain.push(null);
+  }
 
   const body = new URLSearchParams({
     grant_type: "refresh_token",
@@ -173,21 +190,51 @@ export async function refreshAccessToken(
     refresh_token: refreshToken,
   });
 
-  const resp = await withDirectFallback(
-    (proxyUrl) => curlFetchPost(
+  const doRequest = (proxyUrl: string | null | undefined) =>
+    curlFetchPost(
       config.auth.oauth_token_endpoint,
       "application/x-www-form-urlencoded",
       body.toString(),
       { proxyUrl },
-    ),
-    { tag: "OAuth/refresh", shouldFallback: isCfResponse },
-  );
+    );
 
-  if (!resp.ok) {
-    throw new Error(`Token refresh failed (${resp.status}): ${resp.body}`);
+  let lastError: unknown;
+  for (let i = 0; i < chain.length; i++) {
+    try {
+      const resp = await doRequest(chain[i]);
+
+      if (isCfResponse(resp) && i < chain.length - 1) {
+        console.warn(`[OAuth/refresh] CF challenge with proxy step ${i}, falling back`);
+        continue;
+      }
+
+      if (!resp.ok) {
+        throw new Error(`Token refresh failed (${resp.status}): ${resp.body}`);
+      }
+
+      return JSON.parse(resp.body) as TokenResponse;
+    } catch (err) {
+      lastError = err;
+      if (i < chain.length - 1) {
+        // Only fallback to next proxy if the request definitely didn't reach
+        // the server. Mid-connection failures (timeout, reset) mean the server
+        // may have already consumed the one-time RT — retrying would cause
+        // "refresh_token_reused" and permanently kill the RT.
+        if (isSafeToRetryRefresh(err)) {
+          console.warn(`[OAuth/refresh] Connection failed at step ${i} (pre-flight), falling back`);
+          continue;
+        }
+        if (isProxyNetworkError(err)) {
+          console.warn(`[OAuth/refresh] Network error at step ${i} (mid-flight, NOT retrying to protect RT)`);
+        }
+      }
+      throw err;
+    }
   }
 
-  return JSON.parse(resp.body) as TokenResponse;
+  // Unreachable — chain always has at least one entry and the last iteration
+  // either returns or throws without continue. Guard for TypeScript.
+  throw lastError ?? new Error("Token refresh failed: no proxy steps executed");
 }
 
 // ── Pending session management ─────────────────────────────────────
@@ -230,6 +277,7 @@ export function createOAuthSession(
 /**
  * Retrieve and consume a pending session by state.
  * Returns null if not found or expired.
+ * @deprecated Use peekSession + deleteSession for atomic exchange.
  */
 export function consumeSession(
   state: string,
@@ -245,6 +293,33 @@ export function consumeSession(
   }
 
   return session;
+}
+
+/**
+ * Look up a pending session without removing it.
+ * Returns null if not found or expired.
+ * Use deleteSession() after successful token exchange.
+ */
+export function peekSession(
+  state: string,
+): PendingSession | null {
+  const session = pendingSessions.get(state);
+  if (!session) return null;
+
+  // Check expiry — clean up if expired
+  if (Date.now() - session.createdAt > SESSION_TTL_MS) {
+    pendingSessions.delete(state);
+    return null;
+  }
+
+  return session;
+}
+
+/**
+ * Delete a pending session after successful token exchange.
+ */
+export function deleteSession(state: string): void {
+  pendingSessions.delete(state);
 }
 
 // ── Temporary callback server ──────────────────────────────────────
@@ -300,8 +375,14 @@ export function startCallbackServer(
       return;
     }
 
-    const session = consumeSession(state);
+    const session = peekSession(state);
     if (!session) {
+      if (isSessionCompleted(state)) {
+        res.writeHead(200, { "Content-Type": "text/html" });
+        res.end(callbackResultHtml(true));
+        scheduleClose();
+        return;
+      }
       res.writeHead(400, { "Content-Type": "text/html" });
       res.end(callbackResultHtml(false, "Invalid or expired session. Please try again."));
       scheduleClose();
@@ -311,10 +392,13 @@ export function startCallbackServer(
     try {
       const tokens = await exchangeCode(code, session.codeVerifier, session.redirectUri);
       onAccount(tokens.access_token, tokens.refresh_token);
+      deleteSession(state);
+      markSessionCompleted(state);
       console.log(`[OAuth] Callback server on port ${port} — login successful`);
       res.writeHead(200, { "Content-Type": "text/html" });
       res.end(callbackResultHtml(true));
     } catch (err) {
+      // Session stays in map — user can retry
       const msg = err instanceof Error ? err.message : String(err);
       console.error(`[OAuth] Callback server token exchange failed: ${msg}`);
       res.writeHead(200, { "Content-Type": "text/html" });

@@ -15,6 +15,7 @@ interface UpdateModalProps {
   onClose: () => void;
   mode: "git" | "docker" | "electron";
   commits: { hash: string; message: string }[];
+  changelog: string | null;
   release: { version: string; body: string; url: string } | null;
   onApply: () => void;
   applying: boolean;
@@ -28,6 +29,7 @@ export function UpdateModal({
   onClose,
   mode,
   commits,
+  changelog,
   release,
   onApply,
   applying,
@@ -135,14 +137,20 @@ export function UpdateModal({
               </span>
             </div>
           ) : mode === "git" ? (
-            <ul class="space-y-1 text-sm text-slate-600 dark:text-text-dim max-h-64 overflow-y-auto">
-              {commits.map((c) => (
-                <li key={c.hash} class="flex gap-2 py-0.5">
-                  <code class="text-primary/70 text-xs shrink-0 pt-0.5">{c.hash}</code>
-                  <span class="text-xs">{c.message}</span>
-                </li>
-              ))}
-            </ul>
+            changelog ? (
+              <pre class="text-xs text-slate-600 dark:text-text-dim whitespace-pre-wrap max-h-64 overflow-y-auto leading-relaxed">
+                {changelog}
+              </pre>
+            ) : (
+              <ul class="space-y-1 text-sm text-slate-600 dark:text-text-dim max-h-64 overflow-y-auto">
+                {commits.map((c) => (
+                  <li key={c.hash} class="flex gap-2 py-0.5">
+                    <code class="text-primary/70 text-xs shrink-0 pt-0.5">{c.hash}</code>
+                    <span class="text-xs">{c.message}</span>
+                  </li>
+                ))}
+              </ul>
+            )
           ) : (
             <>
               {release && (
@@ -179,21 +187,33 @@ export function UpdateModal({
                 {applying ? t("applyingUpdate") : t("updateNow")}
               </button>
             ) : mode === "docker" ? (
-              <button
-                onClick={() => { navigator.clipboard.writeText("docker compose up -d --build"); }}
-                class="px-4 py-2 text-xs font-semibold bg-primary text-white rounded-lg hover:bg-primary-hover transition-colors"
-              >
-                {t("copy")} docker compose up -d --build
-              </button>
+              <div class="flex flex-col items-end gap-1.5">
+                <button
+                  onClick={() => { navigator.clipboard.writeText("docker compose pull && docker compose up -d"); }}
+                  class="px-4 py-2 text-xs font-semibold bg-primary text-white rounded-lg hover:bg-primary-hover transition-colors"
+                >
+                  {t("copy")} docker compose pull && docker compose up -d
+                </button>
+                <span class="text-[10px] text-slate-400 dark:text-text-dim">
+                  {t("dockerAutoUpdateHint")}
+                </span>
+              </div>
             ) : (
-              <a
-                href={release?.url}
-                target="_blank"
-                rel="noopener noreferrer"
-                class="px-4 py-2 text-xs font-semibold bg-primary text-white rounded-lg hover:bg-primary-hover transition-colors inline-flex"
-              >
-                {t("downloadUpdate")}
-              </a>
+              // electron mode: link to GitHub release page for manual download
+              release?.url ? (
+                <a
+                  href={release.url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  class="px-4 py-2 text-xs font-semibold bg-primary text-white rounded-lg hover:bg-primary-hover transition-colors"
+                >
+                  {t("electronDownloadBtn")}
+                </a>
+              ) : (
+                <span class="text-xs text-slate-500 dark:text-text-dim italic">
+                  {t("electronUpdateHint")}
+                </span>
+              )
             )}
           </div>
         )}

@@ -5,9 +5,11 @@
 export type AccountStatus =
   | "active"
   | "expired"
+  | "quota_exhausted"
   | "rate_limited"
   | "refreshing"
-  | "disabled";
+  | "disabled"
+  | "banned";
 
 export interface AccountUsage {
   request_count: number;
@@ -36,11 +38,19 @@ export interface AccountEntry {
   refreshToken: string | null;
   email: string | null;
   accountId: string | null;
+  /** Per-user unique ID (chatgpt_user_id). Team members share accountId but have distinct userId. */
+  userId: string | null;
+  /** User-editable label for disambiguation (e.g. "Team Alpha", "Personal"). */
+  label: string | null;
   planType: string | null;
   proxyApiKey: string;
   status: AccountStatus;
   usage: AccountUsage;
   addedAt: string;
+  /** Cached official quota from background refresh. Null until first fetch. */
+  cachedQuota: CodexQuota | null;
+  /** ISO timestamp of when cachedQuota was last updated. */
+  quotaFetchedAt: string | null;
 }
 
 /** Public info (no token) */
@@ -48,12 +58,15 @@ export interface AccountInfo {
   id: string;
   email: string | null;
   accountId: string | null;
+  userId: string | null;
+  label: string | null;
   planType: string | null;
   status: AccountStatus;
   usage: AccountUsage;
   addedAt: string;
   expiresAt: string | null;
   quota?: CodexQuota;
+  quotaFetchedAt?: string | null;
 }
 
 /** A single rate limit window (primary or secondary). */
@@ -87,6 +100,8 @@ export interface AcquiredAccount {
   entryId: string;
   token: string;
   accountId: string | null;
+  /** Timestamp of the previous slot on this account (null = first request). */
+  prevSlotMs: number | null;
 }
 
 /** Persistence format */

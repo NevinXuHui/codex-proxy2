@@ -10,6 +10,7 @@ import { existsSync, openSync, readFileSync } from "fs";
 import { resolve } from "path";
 import { promisify } from "util";
 import { getRootDir, isEmbedded } from "./paths.js";
+import { getConfig } from "./config.js";
 
 // ── Restart ─────────────────────────────────────────────────────────
 let _closeHandler: (() => Promise<void>) | null = null;
@@ -105,6 +106,7 @@ export interface ProxySelfUpdateResult {
   currentCommit: string | null;
   latestCommit: string | null;
   commits: CommitInfo[];
+  changelog: string | null;
   release: GitHubReleaseInfo | null;
   updateAvailable: boolean;
   mode: DeployMode;
@@ -223,6 +225,27 @@ async function getCommitLog(cwd: string): Promise<CommitInfo[]> {
   }
 }
 
+/** Extract [Unreleased] section from CHANGELOG.md on origin/master. */
+async function getRemoteChangelog(cwd: string): Promise<string | null> {
+  try {
+    const { stdout } = await execFileAsync(
+      "git", ["show", "origin/master:CHANGELOG.md"],
+      { cwd, timeout: 5000 },
+    );
+    const marker = "## [Unreleased]";
+    const start = stdout.indexOf(marker);
+    if (start === -1) return null;
+    // Find the next ## heading (next version section)
+    const rest = stdout.substring(start + marker.length);
+    const nextHeading = rest.indexOf("\n## ");
+    const section = nextHeading !== -1 ? rest.substring(0, nextHeading) : rest;
+    const trimmed = section.trim();
+    return trimmed || null;
+  } catch {
+    return null;
+  }
+}
+
 /** Check GitHub Releases API for the latest version. */
 async function checkGitHubRelease(): Promise<GitHubReleaseInfo | null> {
   try {
@@ -268,7 +291,7 @@ export async function checkProxySelfUpdate(): Promise<ProxySelfUpdateResult> {
       console.warn("[SelfUpdate] git fetch failed:", err instanceof Error ? err.message : err);
       const result: ProxySelfUpdateResult = {
         commitsBehind: 0, currentCommit, latestCommit: currentCommit,
-        commits: [], release: null, updateAvailable: false, mode,
+        commits: [], changelog: null, release: null, updateAvailable: false, mode,
       };
       _cachedResult = result;
       return result;
@@ -289,10 +312,11 @@ export async function checkProxySelfUpdate(): Promise<ProxySelfUpdateResult> {
     } catch { /* ignore */ }
 
     const commits = commitsBehind > 0 ? await getCommitLog(cwd) : [];
+    const changelog = commitsBehind > 0 ? await getRemoteChangelog(cwd) : null;
 
     const result: ProxySelfUpdateResult = {
       commitsBehind, currentCommit, latestCommit,
-      commits, release: null,
+      commits, changelog, release: null,
       updateAvailable: commitsBehind > 0, mode,
     };
     _cachedResult = result;
@@ -308,7 +332,7 @@ export async function checkProxySelfUpdate(): Promise<ProxySelfUpdateResult> {
 
   const result: ProxySelfUpdateResult = {
     commitsBehind: 0, currentCommit: null, latestCommit: null,
-    commits: [], release: updateAvailable ? release : null,
+    commits: [], changelog: null, release: updateAvailable ? release : null,
     updateAvailable, mode,
   };
   _cachedResult = result;
@@ -372,7 +396,18 @@ async function runCheck(): Promise<void> {
   if (_checking) return;
   _checking = true;
   try {
-    await checkProxySelfUpdate();
+    const result = await checkProxySelfUpdate();
+    if (result.updateAvailable && !_proxyUpdateInProgress && result.mode === "git") {
+      try {
+        const autoUpdate = getConfig().update.auto_update;
+        if (autoUpdate) {
+          console.log(`[SelfUpdate] Auto-updating: ${result.currentCommit ?? "unknown"} → ${result.latestCommit ?? "latest"} (${result.commitsBehind} commits behind)`);
+          await applyProxySelfUpdate();
+        }
+      } catch {
+        // Config may not be loaded yet during early startup; skip auto-apply
+      }
+    }
   } catch (err) {
     console.warn("[SelfUpdate] Periodic check failed:", err instanceof Error ? err.message : err);
   } finally {

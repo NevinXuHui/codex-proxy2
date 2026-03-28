@@ -10,7 +10,8 @@ import type {
 } from "../proxy/codex-api.js";
 import { parseModelName, getModelInfo } from "../models/model-store.js";
 import { getConfig } from "../config.js";
-import { buildInstructions, injectAdditionalProperties } from "./shared-utils.js";
+import { buildInstructions, prepareSchema } from "./shared-utils.js";
+import type { ModelConfigOverride } from "./shared-utils.js";
 import {
   openAIToolsToCodex,
   openAIToolChoiceToCodex,
@@ -78,9 +79,16 @@ function extractContent(
  *   - model → resolved model ID
  *   - reasoning_effort → reasoning.effort
  */
+export interface TranslationResult {
+  codexRequest: CodexResponsesRequest;
+  /** Original schema before tuple conversion — null if no tuples were found. */
+  tupleSchema: Record<string, unknown> | null;
+}
+
 export function translateToCodexRequest(
   req: ChatCompletionRequest,
-): CodexResponsesRequest {
+  modelConfig?: ModelConfigOverride,
+): TranslationResult {
   // Collect system/developer messages as instructions
   const systemMessages = req.messages.filter(
     (m) => m.role === "system" || m.role === "developer",
@@ -88,7 +96,8 @@ export function translateToCodexRequest(
   const userInstructions =
     systemMessages.map((m) => extractText(m.content)).join("\n\n") ||
     "You are a helpful assistant.";
-  const instructions = buildInstructions(userInstructions);
+  const cfg = modelConfig ?? getConfig().model;
+  const instructions = buildInstructions(userInstructions, cfg);
 
   // Build input items from non-system messages
   // Handles new format (tool/tool_calls) and legacy format (function/function_call)
@@ -149,7 +158,6 @@ export function translateToCodexRequest(
   const parsed = parseModelName(req.model);
   const modelId = parsed.modelId;
   const modelInfo = getModelInfo(modelId);
-  const config = getConfig();
 
   // Convert tools to Codex format
   const codexTools = req.tools?.length
@@ -179,20 +187,21 @@ export function translateToCodexRequest(
     req.reasoning_effort ??
     parsed.reasoningEffort ??
     modelInfo?.defaultReasoningEffort ??
-    config.model.default_reasoning_effort;
+    cfg.default_reasoning_effort;
   request.reasoning = { summary: "auto", ...(effort ? { effort } : {}) };
 
   // Service tier: explicit API field > suffix > config default
   const serviceTier =
     req.service_tier ??
     parsed.serviceTier ??
-    config.model.default_service_tier ??
+    cfg.default_service_tier ??
     null;
   if (serviceTier) {
     request.service_tier = serviceTier;
   }
 
   // Response format: translate response_format → text.format
+  let tupleSchema: Record<string, unknown> | null = null;
   if (req.response_format && req.response_format.type !== "text") {
     if (req.response_format.type === "json_object") {
       request.text = { format: { type: "json_object" } };
@@ -200,13 +209,15 @@ export function translateToCodexRequest(
       req.response_format.type === "json_schema" &&
       req.response_format.json_schema
     ) {
+      const prepared = prepareSchema(
+        req.response_format.json_schema.schema as Record<string, unknown>,
+      );
+      tupleSchema = prepared.originalSchema;
       request.text = {
         format: {
           type: "json_schema",
           name: req.response_format.json_schema.name,
-          schema: injectAdditionalProperties(
-            req.response_format.json_schema.schema as Record<string, unknown>,
-          ),
+          schema: prepared.schema,
           ...(req.response_format.json_schema.strict !== undefined
             ? { strict: req.response_format.json_schema.strict }
             : {}),
@@ -215,5 +226,5 @@ export function translateToCodexRequest(
     }
   }
 
-  return request;
+  return { codexRequest: request, tupleSchema };
 }

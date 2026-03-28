@@ -14,7 +14,8 @@ import type {
 } from "../proxy/codex-api.js";
 import { parseModelName, getModelInfo } from "../models/model-store.js";
 import { getConfig } from "../config.js";
-import { buildInstructions, budgetToEffort, injectAdditionalProperties } from "./shared-utils.js";
+import { buildInstructions, budgetToEffort, prepareSchema } from "./shared-utils.js";
+import type { ModelConfigOverride } from "./shared-utils.js";
 import { geminiToolsToCodex, geminiToolConfigToCodex } from "./tool-format.js";
 
 /**
@@ -158,10 +159,16 @@ export function geminiContentsToMessages(
  *   - model (from URL) → resolved model ID
  *   - thinkingConfig → reasoning.effort
  */
+export interface GeminiTranslationResult {
+  codexRequest: CodexResponsesRequest;
+  tupleSchema: Record<string, unknown> | null;
+}
+
 export function translateGeminiToCodexRequest(
   req: GeminiGenerateContentRequest,
   geminiModel: string,
-): CodexResponsesRequest {
+  modelConfig?: ModelConfigOverride,
+): GeminiTranslationResult {
   // Extract system instructions
   let userInstructions: string;
   if (req.systemInstruction) {
@@ -169,7 +176,8 @@ export function translateGeminiToCodexRequest(
   } else {
     userInstructions = "You are a helpful assistant.";
   }
-  const instructions = buildInstructions(userInstructions);
+  const cfg = modelConfig ?? getConfig().model;
+  const instructions = buildInstructions(userInstructions, cfg);
 
   // Build input items from contents
   const input: CodexInputItem[] = [];
@@ -191,7 +199,6 @@ export function translateGeminiToCodexRequest(
   const parsed = parseModelName(geminiModel);
   const modelId = parsed.modelId;
   const modelInfo = getModelInfo(modelId);
-  const config = getConfig();
 
   // Convert tools to Codex format
   const codexTools = req.tools?.length ? geminiToolsToCodex(req.tools) : [];
@@ -220,30 +227,31 @@ export function translateGeminiToCodexRequest(
     thinkingEffort ??
     parsed.reasoningEffort ??
     modelInfo?.defaultReasoningEffort ??
-    config.model.default_reasoning_effort;
+    cfg.default_reasoning_effort;
   request.reasoning = { summary: "auto", ...(effort ? { effort } : {}) };
 
   // Service tier: suffix > config default
   const serviceTier =
     parsed.serviceTier ??
-    config.model.default_service_tier ??
+    cfg.default_service_tier ??
     null;
   if (serviceTier) {
     request.service_tier = serviceTier;
   }
 
   // Response format: translate responseMimeType + responseSchema → text.format
+  let tupleSchema: Record<string, unknown> | null = null;
   const mimeType = req.generationConfig?.responseMimeType;
   if (mimeType === "application/json") {
     const schema = req.generationConfig?.responseSchema;
     if (schema && Object.keys(schema).length > 0) {
-      // Codex strict mode requires additionalProperties: false on every object
-      const strictSchema = injectAdditionalProperties(schema as Record<string, unknown>);
+      const prepared = prepareSchema(schema as Record<string, unknown>);
+      tupleSchema = prepared.originalSchema;
       request.text = {
         format: {
           type: "json_schema",
           name: "gemini_schema",
-          schema: strictSchema,
+          schema: prepared.schema,
           strict: true,
         },
       };
@@ -252,5 +260,5 @@ export function translateGeminiToCodexRequest(
     }
   }
 
-  return request;
+  return { codexRequest: request, tupleSchema };
 }

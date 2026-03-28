@@ -8,11 +8,28 @@
  */
 
 import { spawn, execFile } from "child_process";
-import { resolveCurlBinary, getChromeTlsArgs, getProxyArgs, isImpersonate as curlIsImpersonate } from "./curl-binary.js";
+import { resolveCurlBinary, getChromeTlsArgs, getProxyArgs, isImpersonate as curlIsImpersonate, supportsCompressed, checkHttp2Fallback } from "./curl-binary.js";
 import type { TlsTransport, TlsTransportResponse } from "./transport.js";
+import { getConfig } from "../config.js";
 
 const STATUS_SEPARATOR = "\n__CURL_HTTP_STATUS__";
-const HEADER_TIMEOUT_MS = 30_000;
+const DEFAULT_HEADER_TIMEOUT_MS = 120_000;
+
+function getHeaderTimeoutMs(): number {
+  try {
+    return getConfig().api.timeout_seconds * 1000;
+  } catch {
+    return DEFAULT_HEADER_TIMEOUT_MS;
+  }
+}
+
+/** Push header args to curl, skipping Accept-Encoding so --compressed can auto-negotiate. */
+export function pushHeaderArgs(args: string[], headers: Record<string, string>): void {
+  for (const [key, value] of Object.entries(headers)) {
+    if (key.toLowerCase() === "accept-encoding") continue;
+    args.push("-H", `${key}: ${value}`);
+  }
+}
 
 export class CurlCliTransport implements TlsTransport {
   /**
@@ -32,7 +49,7 @@ export class CurlCliTransport implements TlsTransport {
         ...getChromeTlsArgs(),
         ...resolveProxyArgs(proxyUrl),
         "-s", "-S",
-        "--compressed",
+        ...(supportsCompressed() ? ["--compressed"] : []),
         "-N",            // no output buffering (SSE)
         "-i",            // include response headers in stdout
         "-X", "POST",
@@ -43,9 +60,7 @@ export class CurlCliTransport implements TlsTransport {
         args.push("--max-time", String(timeoutSec));
       }
 
-      for (const [key, value] of Object.entries(headers)) {
-        args.push("-H", `${key}: ${value}`);
-      }
+      pushHeaderArgs(args, headers);
       // Suppress curl's auto Expect: 100-continue (Chromium never sends it)
       args.push("-H", "Expect:");
       args.push(url);
@@ -79,9 +94,9 @@ export class CurlCliTransport implements TlsTransport {
       const headerTimer = setTimeout(() => {
         if (!headersParsed) {
           child.kill("SIGTERM");
-          reject(new Error(`curl header parse timeout after ${HEADER_TIMEOUT_MS}ms`));
+          reject(new Error(`curl header parse timeout after ${getHeaderTimeoutMs()}ms`));
         }
-      }, HEADER_TIMEOUT_MS);
+      }, getHeaderTimeoutMs());
       if (headerTimer.unref) headerTimer.unref();
 
       const bodyStream = new ReadableStream<Uint8Array>({
@@ -150,9 +165,16 @@ export class CurlCliTransport implements TlsTransport {
           signal.removeEventListener("abort", onAbort);
         }
         if (!headersParsed) {
+          checkHttp2Fallback(stderrBuf, code);
           reject(new Error(`curl exited with code ${code}: ${stderrBuf}`));
+        } else if (code !== 0 && code !== null) {
+          // curl died mid-stream (e.g. connection reset, SIGPIPE) — signal error to reader
+          try {
+            bodyController?.error(new Error(`curl exited with code ${code} mid-stream: ${stderrBuf.trim() || "connection lost"}`));
+          } catch { /* stream already closed */ }
+        } else {
+          bodyController?.close();
         }
-        bodyController?.close();
       });
 
       child.on("error", (err) => {
@@ -160,7 +182,7 @@ export class CurlCliTransport implements TlsTransport {
         if (signal) {
           signal.removeEventListener("abort", onAbort);
         }
-        reject(new Error(`curl spawn error: ${err.message}`));
+        reject(new Error(formatSpawnError(err)));
       });
     });
   }
@@ -178,18 +200,43 @@ export class CurlCliTransport implements TlsTransport {
       ...getChromeTlsArgs(),
       ...resolveProxyArgs(proxyUrl),
       "-s", "-S",
-      "--compressed",
+      ...(supportsCompressed() ? ["--compressed"] : []),
       "--max-time", String(timeoutSec),
     ];
 
-    for (const [key, value] of Object.entries(headers)) {
-      args.push("-H", `${key}: ${value}`);
-    }
+    pushHeaderArgs(args, headers);
     args.push("-H", "Expect:");
     args.push("-w", STATUS_SEPARATOR + "%{http_code}");
     args.push(url);
 
     return execCurl(args);
+  }
+
+  /**
+   * GET with Set-Cookie header capture via -D /dev/stderr.
+   * Used by warmup to establish session cookies after account import.
+   */
+  getWithCookies(
+    url: string,
+    headers: Record<string, string>,
+    timeoutSec = 30,
+    proxyUrl?: string | null,
+  ): Promise<{ status: number; body: string; setCookieHeaders: string[] }> {
+    const args = [
+      ...getChromeTlsArgs(),
+      ...resolveProxyArgs(proxyUrl),
+      "-s", "-S",
+      "-D", "/dev/stderr",
+      ...(supportsCompressed() ? ["--compressed"] : []),
+      "--max-time", String(timeoutSec),
+    ];
+
+    pushHeaderArgs(args, headers);
+    args.push("-H", "Expect:");
+    args.push("-w", STATUS_SEPARATOR + "%{http_code}");
+    args.push(url);
+
+    return execCurlWithHeaders(args);
   }
 
   /**
@@ -207,14 +254,12 @@ export class CurlCliTransport implements TlsTransport {
       ...getChromeTlsArgs(),
       ...resolveProxyArgs(proxyUrl),
       "-s", "-S",
-      "--compressed",
+      ...(supportsCompressed() ? ["--compressed"] : []),
       "--max-time", String(timeoutSec),
       "-X", "POST",
     ];
 
-    for (const [key, value] of Object.entries(headers)) {
-      args.push("-H", `${key}: ${value}`);
-    }
+    pushHeaderArgs(args, headers);
     args.push("-H", "Expect:");
     args.push("-d", body);
     args.push("-w", STATUS_SEPARATOR + "%{http_code}");
@@ -228,6 +273,65 @@ export class CurlCliTransport implements TlsTransport {
   }
 }
 
+/**
+ * Format a spawn error with architecture hint for EBADARCH (-86) on macOS.
+ * This commonly happens when curl-impersonate binary doesn't match the CPU arch.
+ */
+export function formatSpawnError(err: Error & { errno?: number; code?: string }): string {
+  // errno -86 = EBADARCH (Bad CPU type in executable) on macOS
+  if (err.errno === -86 || err.message.includes("-86")) {
+    const binary = resolveCurlBinary();
+    return (
+      `curl-impersonate binary has wrong CPU architecture for this system. ` +
+      `Binary: ${binary}, Host arch: ${process.arch}. ` +
+      `Fix: run "npm run setup -- --force" to download the correct binary, ` +
+      `or delete bin/curl-impersonate to fall back to system curl.`
+    );
+  }
+  return `curl spawn error: ${err.message}`;
+}
+
+/** Execute curl via execFile, parse status + Set-Cookie headers from stderr (-D /dev/stderr). */
+function execCurlWithHeaders(args: string[]): Promise<{ status: number; body: string; setCookieHeaders: string[] }> {
+  return new Promise((resolve, reject) => {
+    execFile(
+      resolveCurlBinary(),
+      args,
+      { maxBuffer: 2 * 1024 * 1024 },
+      (err, stdout, stderr) => {
+        if (err) {
+          const castErr = err as Error & { errno?: number; code?: string };
+          if (castErr.errno === -86 || err.message.includes("-86")) {
+            reject(new Error(formatSpawnError(castErr)));
+          } else {
+            const exitCode = typeof castErr.code === "string" ? parseInt(castErr.code, 10) : null;
+            checkHttp2Fallback(stderr, Number.isNaN(exitCode) ? null : exitCode);
+            reject(new Error(`curl failed: ${err.message} ${stderr}`));
+          }
+          return;
+        }
+
+        const sepIdx = stdout.lastIndexOf(STATUS_SEPARATOR);
+        if (sepIdx === -1) {
+          reject(new Error("curl: missing status separator in output"));
+          return;
+        }
+
+        const body = stdout.slice(0, sepIdx);
+        const status = parseInt(stdout.slice(sepIdx + STATUS_SEPARATOR.length), 10);
+
+        // Parse Set-Cookie from dumped headers in stderr
+        const setCookieHeaders = stderr
+          .split(/\r?\n/)
+          .filter((line) => /^set-cookie:/i.test(line))
+          .map((line) => line.replace(/^set-cookie:\s*/i, ""));
+
+        resolve({ status, body, setCookieHeaders });
+      },
+    );
+  });
+}
+
 /** Execute curl via execFile and parse the status code from the output. */
 function execCurl(args: string[]): Promise<{ status: number; body: string }> {
   return new Promise((resolve, reject) => {
@@ -237,7 +341,15 @@ function execCurl(args: string[]): Promise<{ status: number; body: string }> {
       { maxBuffer: 2 * 1024 * 1024 },
       (err, stdout, stderr) => {
         if (err) {
-          reject(new Error(`curl failed: ${err.message} ${stderr}`));
+          const castErr = err as Error & { errno?: number; code?: string };
+          // Check for EBADARCH first (architecture mismatch)
+          if (castErr.errno === -86 || err.message.includes("-86")) {
+            reject(new Error(formatSpawnError(castErr)));
+          } else {
+            const exitCode = typeof castErr.code === "string" ? parseInt(castErr.code, 10) : null;
+            checkHttp2Fallback(stderr, Number.isNaN(exitCode) ? null : exitCode);
+            reject(new Error(`curl failed: ${err.message} ${stderr}`));
+          }
           return;
         }
 

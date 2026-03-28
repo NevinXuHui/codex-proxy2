@@ -18,7 +18,7 @@ import {
 } from "fs";
 import { resolve, dirname } from "path";
 import { getDataDir } from "../paths.js";
-import { getTransport } from "../tls/transport.js";
+import { getTransport, type TlsTransport } from "../tls/transport.js";
 
 function getProxiesFile(): string {
   return resolve(getDataDir(), "proxies.json");
@@ -70,8 +70,10 @@ export class ProxyPool {
   private persistTimer: ReturnType<typeof setTimeout> | null = null;
   private healthTimer: ReturnType<typeof setInterval> | null = null;
   private _roundRobinIndex = 0;
+  private injectedTransport: TlsTransport | undefined;
 
-  constructor() {
+  constructor(transport?: TlsTransport) {
+    this.injectedTransport = transport;
     this.load();
   }
 
@@ -206,7 +208,7 @@ export class ProxyPool {
    *   null     — direct connection (no proxy)
    *   string   — specific proxy URL
    */
-  resolveProxyUrl(accountId: string): string | null | undefined {
+  resolveProxyUrl(accountId: string, skipUnhealthy = false): string | null | undefined {
     const assignment = this.getAssignment(accountId);
 
     if (assignment === "global") return undefined;
@@ -218,8 +220,16 @@ export class ProxyPool {
 
     // Specific proxy ID
     const proxy = this.proxies.get(assignment);
-    if (!proxy || proxy.status !== "active") {
-      // Proxy deleted or unreachable/disabled — fall back to global
+    if (!proxy) {
+      // Proxy deleted — fall back to global
+      return undefined;
+    }
+    if (proxy.status === "disabled") {
+      // Manually disabled — fall back to global
+      return undefined;
+    }
+    if (proxy.status === "unreachable" && skipUnhealthy) {
+      // Health-check failed — caller requested skipping unhealthy proxies
       return undefined;
     }
     return proxy.url;
@@ -249,7 +259,7 @@ export class ProxyPool {
       throw new Error(`Proxy ${id} not found`);
     }
 
-    const transport = getTransport();
+    const transport = this.injectedTransport ?? getTransport();
     const start = Date.now();
 
     try {
